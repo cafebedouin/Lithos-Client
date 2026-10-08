@@ -145,6 +145,33 @@ rigel.exe -a autolykos2 -o stratum+tcp://127.0.0.1:4444 -u YOUR_ERG_WALLET -w my
 ```
 Keep in mind that the `ERG_WALLET` and Worker name have no effect on Lithos, and can be set to any valid String.
 
+## Block Transactions
+Besides the genesis transaction, a block you find carries transactions the client builds for itself: rollup work,
+storage-rent collections, order executions. They pay no fee and are configured under `stratum.candidate` in
+`application.conf`, one block per source under `sources`, each with its own limits on transactions, bytes and cost.
+
+### Upkeep
+Upkeep is maintenance of other protocols' boxes carried in your own block: boxes whose script says when one is
+due and what its successor is, so that anyone may advance them with no key. Storage rent is the same idea applied
+to Ergo's own four-year rule; upkeep applies it to a registry of reviewed jobs, one per protocol, each advancing
+only the boxes it maintains.
+
+It is **off by default**, and so is every job. To run it, enable the source and then the jobs you want:
+```hocon
+stratum.candidate.sources.upkeep.enabled = true
+stratum.candidate.sources.upkeep.jobs.heartbeat.enabled = true
+```
+The first job, `heartbeat`, advances due-job boxes (`DueJob.ergo` in lithos-lib) and pays their tip to your
+collection output. Finding them by script needs a node started with `ergo.node.extraIndex = true`; on a plain
+node, list the boxes to maintain in `jobs.heartbeat.boxIds`. A job name the client does not know is refused at
+startup.
+
+Upkeep never spends your ERG. A job's transaction may only spend the boxes that job found, and the client refuses
+one that spends anything else; your wallet is never an input and no fee is paid. It does not reorder, front-run or
+replace anyone's transaction either: it advances boxes whose own scripts invite it, in the order the scripts
+allow, and nothing else in the block is touched. A box a job cannot advance is set aside and tried again after
+`retryAfterScans` discovery passes.
+
 ## KYA
 The Lithos Testnet release accesses your node's secret keys via it's keystore in order to sign and generate transactions.
 We **heavily** recommend that you generate a new secret key for testnet which is not related to any mainnet wallets you

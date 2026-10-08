@@ -118,7 +118,7 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
           val jobs = transactions.upkeep.UpkeepRegistry.enabled(upkeepConfig)
           // Built here rather than inside the actor, so every incarnation after a restart shares it
           // and a refused box is not offered to the node again.
-          val memory = new transactions.upkeep.UpkeepSource.Memory
+          val memory = new transactions.upkeep.UpkeepSource.Memory(upkeepConfig.retryAfterScans)
           Some(mining.MiningMessages.CandidateSource(configs.CandidateSourceConfig.Upkeep,
             system.actorOf(akka.actor.Props(new transactions.upkeep.UpkeepSource(
               nodeConfig, upkeepConfig, upkeepLimits, jobs, memory,

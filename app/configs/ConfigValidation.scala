@@ -207,6 +207,9 @@ object Configs {
     v.range("stratum.candidate.sources.upkeep.maxBoxesPerJob",
       v.int("stratum.candidate.sources.upkeep.maxBoxesPerJob"), 1, 4096,
       "box ids one upkeep job may hold between passes")
+    v.range("stratum.candidate.sources.upkeep.retryAfterScans",
+      v.int("stratum.candidate.sources.upkeep.retryAfterScans"), 1, 100000,
+      "discovery passes a refused upkeep box sits out before it is offered again")
     // Jobs are read generically, so this is the one place a misspelt or unknown job name is caught:
     // enabled, it would otherwise be maintenance the operator expects and never gets.
     Try(config.getOptional("stratum.candidate.sources.upkeep.jobs")(ConfigLoader.configurationLoader)) match {

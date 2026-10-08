@@ -11,14 +11,20 @@ import play.api.{ConfigLoader, Configuration}
  *
  * @param scanIntervalMs gap between discovery passes. Discovery is background work and must never
  *                       be on the path a block is built on.
- * @param maxBoxesPerJob box ids one job may hold between passes. A job that finds more keeps the
- *                       first this many, so one busy protocol cannot grow the actor's memory or the
- *                       build's node read without bound.
- * @param jobs           each configured job name and whether it is on. Absent is off.
- * @param heartbeat      what the heartbeat job needs beyond its flag. The one job with settings of
- *                       its own so far; a job that needs none is just its flag in `jobs`.
+ * @param maxBoxesPerJob  box ids one job may hold between passes. A job that finds more keeps the
+ *                        first this many, so one busy protocol cannot grow the actor's memory or
+ *                        the build's node read without bound.
+ * @param retryAfterScans discovery passes a box whose build was refused sits out before it is
+ *                        offered again. A refusal may be the box's own doing or the moment's — a
+ *                        node that could not be read — and the source cannot tell which, so it
+ *                        retries after this many passes rather than never; a box refused again
+ *                        sits out as many again.
+ * @param jobs            each configured job name and whether it is on. Absent is off.
+ * @param heartbeat       what the heartbeat job needs beyond its flag. The one job with settings
+ *                        of its own so far; a job that needs none is just its flag in `jobs`.
  */
-case class UpkeepConfig(scanIntervalMs: Int, maxBoxesPerJob: Int, jobs: Map[String, Boolean],
+case class UpkeepConfig(scanIntervalMs: Int, maxBoxesPerJob: Int, retryAfterScans: Int,
+                        jobs: Map[String, Boolean],
                         heartbeat: HeartbeatConfig = HeartbeatConfig.Default) {
   def jobEnabled(name: String): Boolean = jobs.getOrElse(name, false)
 }
@@ -31,6 +37,7 @@ object UpkeepConfig {
   val Default: UpkeepConfig = UpkeepConfig(
     scanIntervalMs = 60000,
     maxBoxesPerJob = 256,
+    retryAfterScans = 10,
     jobs = Map.empty,
     heartbeat = HeartbeatConfig.Default)
 
@@ -49,6 +56,7 @@ object UpkeepConfig {
     UpkeepConfig(
       scanIntervalMs = int("scanIntervalMs", Default.scanIntervalMs),
       maxBoxesPerJob = int("maxBoxesPerJob", Default.maxBoxesPerJob),
+      retryAfterScans = int("retryAfterScans", Default.retryAfterScans),
       jobs = jobs,
       heartbeat = HeartbeatConfig(config))
   }

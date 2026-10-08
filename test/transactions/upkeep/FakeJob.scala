@@ -47,24 +47,34 @@ final class FakeJob(wallet: NodeWallet, val name: String = "fake") extends Upkee
     builds.incrementAndGet()
     behaviour match {
       case Advance => Some(advance(ctx, Seq(box), height, payTo))
+      case Padded(tipOutputs) => Some(advance(ctx, Seq(box), height, payTo, tipOutputs))
       case Refuse => None
       case Throw => throw new IllegalStateException("the fake job cannot sign")
+      case ThrowFor(boxId) if boxId == box.id.toString => throw new IllegalStateException(s"the fake job trips on $boxId")
+      case ThrowFor(_) => Some(advance(ctx, Seq(box), height, payTo))
       case SpendAlso(extra) => Some(advance(ctx, Seq(box, extra.toInputUTXO(ctx)), height, payTo))
     }
   }
 
-  /** Every input recreated `Tip` lighter, and the tips at `payTo`: fee-less, and it balances to zero change. */
+  /**
+   * Every input recreated `Tip` lighter, and the tips at `payTo` over `tipOutputs` boxes: fee-less,
+   * and it balances to zero change. More tip outputs make a dearer transaction, which is how a spec
+   * gets two successors of different cost out of boxes of the same shape.
+   */
   private def advance(ctx: BlockchainContext, inputs: Seq[InputUTXO], height: Int,
-                      payTo: Contract): UpkeepJob.Built = {
+                      payTo: Contract, tipOutputs: Int = 1): UpkeepJob.Built = {
     val successors = inputs.map(in =>
       UTXO(in.contract, in.value - Tip, in.tokens, in.registers).setCreationHeight(height))
-    val tip = UTXO(payTo, Tip * inputs.size).setCreationHeight(height)
-    val outputs = successors :+ tip
+    val total = Tip * inputs.size
+    val tips = (0 until tipOutputs).map { i =>
+      UTXO(payTo, total / tipOutputs + (if (i == 0) total % tipOutputs else 0L)).setCreationHeight(height)
+    }
+    val outputs = successors ++ tips
     val unsigned = TxBuilder(ctx).setInputs(inputs: _*).setOutputs(outputs: _*).buildTx(0L, wallet.p2pk)
     val signed = wallet.sign(unsigned)
-    val entry = CapitalEntry(CapitalOrigin.ExecutorReward,
-      InputUTXO(signed.getOutputsToSpend.get(inputs.size)), parentTxId = signed.getId)
-    UpkeepJob.Built(signed, Seq(entry))
+    val entries = tips.indices.map(i => CapitalEntry(CapitalOrigin.ExecutorReward,
+      InputUTXO(signed.getOutputsToSpend.get(inputs.size + i)), parentTxId = signed.getId))
+    UpkeepJob.Built(signed, entries)
   }
 }
 
@@ -78,11 +88,21 @@ object FakeJob {
   /** Build the successor and the tip. */
   case object Advance extends Behaviour
 
+  /**
+   * Build the successor and the tip split over this many outputs, so the transaction costs the
+   * block more than [[Advance]]'s. Each output must still clear the consensus minimum: at twenty,
+   * a tip share is 50,000 nanoERG against a minimum near 20,000.
+   */
+  final case class Padded(tipOutputs: Int) extends Behaviour
+
   /** Say the box cannot be advanced. */
   case object Refuse extends Behaviour
 
   /** Fail inside the build. */
   case object Throw extends Behaviour
+
+  /** Fail inside the build for one box, and advance every other. */
+  final case class ThrowFor(boxId: String) extends Behaviour
 
   /** Build a successor that also spends a box the job never discovered. */
   final case class SpendAlso(extra: NodeBox) extends Behaviour

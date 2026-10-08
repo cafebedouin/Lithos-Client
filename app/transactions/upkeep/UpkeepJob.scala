@@ -27,10 +27,13 @@ import work.lithos.mutations.{Contract, InputUTXO}
  *  4. Discovery returns ids, and the build gets the box read back fresh. What a scan found is
  *     stale by the time a block is built, so nothing a job learned at discovery may be trusted at
  *     build time.
- *  5. "Not yet" belongs in [[due]], "cannot" in [[build]]. A box `build` returns nothing for is
- *     remembered as refused and not tried again until it changes, so a job that says no to a box
- *     it will be able to advance next block stalls that box for good.
- *  6. Bounded: the source fits what every job built to its own budget before the package does.
+ *  5. "Not yet" belongs in [[due]], "cannot" in [[build]]. A box `build` returns nothing for, or
+ *     throws on, is remembered as refused and not tried again until it changes or until the
+ *     configured number of discovery passes has gone by, so a job that says no to a box it will
+ *     be able to advance next block stalls that box for that long.
+ *  6. Bounded: the source sizes every due box against what is left of its own share before the
+ *     job builds it, measures what the job built, and fits that to the share before the package
+ *     does. A job need not count; it may not understate.
  *  7. Never extractive. Nothing here reorders, front-runs or sandwiches anyone's transaction, and a
  *     job that would is not accepted into the registry.
  */

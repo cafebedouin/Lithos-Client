@@ -4,6 +4,7 @@ import akka.actor.{ActorRef, ActorSystem, Kill, Props}
 import akka.testkit.{TestKit, TestProbe}
 import com.typesafe.config.ConfigFactory
 import configs.{CandidateSourceConfig, UpkeepConfig}
+import node.MutationConversions._
 import node.NodeApi
 import node.model.NodeBox
 import org.ergoplatform.appkit.Parameters
@@ -16,7 +17,7 @@ import org.scalatestplus.mockito.MockitoSugar
 import support.{CanonicalNodeBox, FakeNodeContext, RestartingSupervisor}
 import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
 import transactions.candidate.CandidateBundle
-import transactions.upkeep.UpkeepSource.{Held, Holding, ScanTick}
+import transactions.upkeep.UpkeepSource.ScanTick
 
 import java.util.concurrent.atomic.AtomicInteger
 import scala.collection.mutable.ArrayBuffer
@@ -36,6 +37,11 @@ object UpkeepSourceSpec {
  * Every property here is about what the actor does between its two halves — what a scan leaves
  * behind, what a build reads, forgets and refuses, and what a request is answered with — rather
  * than about any job's transaction, which is the job's own spec to prove.
+ *
+ * Nothing here looks inside the actor. A scan lands off the mailbox, so a spec waits for what it
+ * left behind to show: in what the next build asks the node for, in the job's own counters, in
+ * the refusal memory the source is handed, and in what a request is answered with. Those are the
+ * effects the mining path sees, and the only ones the actor is accountable for.
  */
 class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepSourceSpec.config))
   with AnyFlatSpecLike with Matchers with BeforeAndAfterAll with MockitoSugar {
@@ -46,16 +52,22 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
 
   private def nextHeight(): Int = heights.incrementAndGet()
 
-  private def id(seed: String): String = (seed * 64).take(64)
+  /** A box or transaction id from any seed: the seed's bytes as hex, repeated to 64 characters. */
+  private def id(seed: String): String =
+    (seed.getBytes("UTF-8").map(b => f"$b%02x").mkString * 64).take(64)
 
-  private val limits: CandidateSourceConfig = CandidateSourceConfig.Default
+  private val defaultLimits: CandidateSourceConfig = CandidateSourceConfig.Default
 
   /**
-   * @param jobs       how many of the two fake jobs are handed to the source
-   * @param supervised under a restarting parent, for the incarnation test
+   * @param jobs            how many of the two fake jobs are handed to the source
+   * @param retryAfterScans passes a refused box sits out; large unless a spec is about the retry
+   * @param supervised      under a restarting parent, for the incarnation test
    */
   private class Fixture(enabled: Boolean = true, jobEnabled: Boolean = true, jobs: Int = 1,
-                        maxBoxes: Int = UpkeepConfig.Default.maxBoxesPerJob, supervised: Boolean = false) {
+                        maxBoxes: Int = UpkeepConfig.Default.maxBoxesPerJob,
+                        retryAfterScans: Int = 1000,
+                        limits: CandidateSourceConfig = defaultLimits,
+                        supervised: Boolean = false) {
     val api: NodeApi = mock[NodeApi]
     val (nodeContext, _, wallet) = FakeNodeContext(api, numAddresses = 1)
 
@@ -71,9 +83,9 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     val job = new FakeJob(wallet)
     val other = new FakeJob(wallet, "other")
     val upkeepConfig: UpkeepConfig = UpkeepConfig.Default.copy(maxBoxesPerJob = maxBoxes,
-      jobs = Map(job.name -> jobEnabled, other.name -> jobEnabled))
+      retryAfterScans = retryAfterScans, jobs = Map(job.name -> jobEnabled, other.name -> jobEnabled))
     val enabledJobs: Seq[UpkeepJob] = UpkeepRegistry.enabled(upkeepConfig, Seq(job, other).take(jobs))
-    val memory = new UpkeepSource.Memory
+    val memory = new UpkeepSource.Memory(retryAfterScans)
     val props: Props = Props(new UpkeepSource(nodeContext, upkeepConfig, limits.copy(enabled = enabled),
       enabledJobs, memory, useTrueProp = false))
     val probe = TestProbe()
@@ -96,20 +108,25 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
       ready.bundles
     }
 
-    def held(): Held = {
-      probe.send(source, Holding)
-      probe.expectMsgType[Held]
-    }
-
-    /** A scan lands off the mailbox, so the spec waits for what it left behind. */
-    def scanUntil(landed: Held => Boolean): Held = {
+    /**
+     * Tick, then ask for blocks until `landed` holds, and answer with the bundles of the request
+     * that saw it. A request made before the pass lands is answered from the pass before, so the
+     * effect a spec waits for has to be one a request after the pass produces: a node read, a
+     * build, a count in the memory.
+     */
+    def scanUntil(landed: => Boolean): Seq[CandidateBundle] = {
       source ! ScanTick
       awaitAssert({
-        val now = held()
-        withClue(s"holding $now: ") { landed(now) shouldBe true }
-        now
+        val bundles = request()
+        withClue(s"after ${reads.synchronized(reads.size)} reads, ${job.builds.get} builds, " +
+          s"refused ${memory.refusedIds.map(_.take(8))}: ") { landed shouldBe true }
+        bundles
       }, 20.seconds, 100.millis)
     }
+
+    def readCount: Int = reads.synchronized(reads.size)
+
+    def lastRead: Seq[String] = reads.synchronized(reads.last)
 
     def nodeTouched: Boolean = !org.mockito.Mockito.mockingDetails(api).getInvocations.isEmpty
   }
@@ -150,9 +167,7 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     f.job.discovered = Seq(a.boxId, b.boxId)
     f.live = Seq(a) // b is already spent
 
-    f.scanUntil(_.tracked.get("fake").contains(Set(a.boxId, b.boxId)))
-
-    val bundles = f.request()
+    val bundles = f.scanUntil(f.readCount > 0)
     bundles should have size 1
     val member = bundles.head.members.head
     member.kind shouldBe Upkeep.kind("fake")
@@ -160,19 +175,22 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     member.sizeBytes should be > 0
     member.cost should be > 0L
     bundles.head.capital.map(_.value) shouldBe Seq(FakeJob.Tip)
-    f.reads.synchronized(f.reads.head.sorted) shouldBe Seq(a.boxId, b.boxId).sorted
+    f.lastRead.sorted shouldBe Seq(a.boxId, b.boxId).sorted
 
     // The read is the revalidation: the id that did not come back is gone from what is held.
-    f.held().tracked("fake") shouldBe Set(a.boxId)
     f.request() should have size 1
-    f.reads.synchronized(f.reads.last) shouldBe Seq(a.boxId)
+    f.lastRead shouldBe Seq(a.boxId)
   }
 
   it should "keep at most maxBoxesPerJob ids for one job" in {
     val f = new Fixture(maxBoxes = 1)
-    f.job.discovered = Seq(f.box("a").boxId, f.box("b").boxId)
+    val a = f.box("a")
+    val b = f.box("b")
+    f.job.discovered = Seq(a.boxId, b.boxId)
+    f.live = Seq(a, b)
 
-    f.scanUntil(_.tracked.get("fake").exists(_.nonEmpty)).tracked("fake") should have size 1
+    f.scanUntil(f.readCount > 0)
+    f.lastRead should have size 1
   }
 
   it should "skip a job whose discovery throws and still offer the others' work" in {
@@ -182,13 +200,11 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     f.live = Seq(a)
     f.job.discoverFails = true
 
-    val held = f.scanUntil(_.tracked.get("other").contains(Set(a.boxId)))
-    held.tracked.get("fake") shouldBe None
+    val bundles = f.scanUntil(f.readCount > 0)
     f.job.discoveries.get should be >= 1
-
-    val bundles = f.request()
     bundles should have size 1
     bundles.head.members.head.kind shouldBe Upkeep.kind("other")
+    f.lastRead shouldBe Seq(a.boxId)
   }
 
   // ─── due and refused ──────────────────────────────────────────────────────
@@ -200,11 +216,10 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     f.live = Seq(a)
     f.job.isDue = false
 
-    f.scanUntil(_.tracked.get("fake").exists(_.nonEmpty))
-    f.request() shouldBe empty
-    f.job.dueChecks.get shouldBe 1
+    f.scanUntil(f.readCount > 0) shouldBe empty
+    f.job.dueChecks.get should be >= 1
     f.job.builds.get shouldBe 0
-    f.held().refused shouldBe empty
+    f.memory.refusedIds shouldBe empty
 
     // Not yet is not a refusal: the same box is built as soon as it is due.
     f.job.isDue = true
@@ -219,10 +234,8 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     f.live = Seq(a, stray)
     f.job.behaviour = FakeJob.SpendAlso(stray)
 
-    f.scanUntil(_.tracked.get("fake").exists(_.nonEmpty))
-    f.request() shouldBe empty
-    f.job.builds.get shouldBe 1
-    f.held().refused shouldBe Set(a.boxId)
+    f.scanUntil(f.job.builds.get == 1) shouldBe empty
+    f.memory.refusedIds shouldBe Set(a.boxId)
 
     f.request() shouldBe empty
     f.job.builds.get shouldBe 1
@@ -235,13 +248,11 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     f.live = Seq(a)
     f.job.behaviour = FakeJob.Refuse
 
-    f.scanUntil(_.tracked.get("fake").exists(_.nonEmpty))
-    f.request() shouldBe empty
-    f.job.builds.get shouldBe 1
+    f.scanUntil(f.job.builds.get == 1) shouldBe empty
 
     f.request() shouldBe empty
     withClue("a refused box must not be built again: ") { f.job.builds.get shouldBe 1 }
-    f.held().refused shouldBe Set(a.boxId)
+    f.memory.refusedIds shouldBe Set(a.boxId)
   }
 
   it should "treat a build that throws as refused" in {
@@ -251,10 +262,47 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     f.live = Seq(a)
     f.job.behaviour = FakeJob.Throw
 
-    f.scanUntil(_.tracked.get("fake").exists(_.nonEmpty))
-    f.request() shouldBe empty
+    f.scanUntil(f.job.builds.get == 1) shouldBe empty
     f.request() shouldBe empty
     f.job.builds.get shouldBe 1
+    f.memory.refusedIds shouldBe Set(a.boxId)
+  }
+
+  /** A job is reviewed code, not trusted code: one box it trips on costs the block that box alone. */
+  it should "lose only the box a job throws on, and still offer the rest and the other job's work" in {
+    val f = new Fixture(jobs = 2)
+    val a = f.box("a")
+    val b = f.box("b")
+    val c = f.box("c")
+    f.job.discovered = Seq(a.boxId, b.boxId)
+    f.other.discovered = Seq(c.boxId)
+    f.live = Seq(a, b, c)
+    f.job.behaviour = FakeJob.ThrowFor(a.boxId)
+
+    val bundles = f.scanUntil(f.job.builds.get >= 2 && f.other.builds.get >= 1)
+    bundles.map(_.members.head.kind).sorted shouldBe Seq(Upkeep.kind("fake"), Upkeep.kind("other"))
+    bundles.flatMap(_.members.head.inputIds).toSet shouldBe Set(b.boxId, c.boxId)
+    f.memory.refusedIds shouldBe Set(a.boxId)
+
+    // Next block: the box that tripped the job is not tried again, the other two are.
+    val built = (f.job.builds.get, f.other.builds.get)
+    f.request() should have size 2
+    (f.job.builds.get, f.other.builds.get) shouldBe (built._1 + 1, built._2 + 1)
+  }
+
+  it should "refuse a box the node reports in a form that cannot be read, and keep the rest" in {
+    val f = new Fixture()
+    val a = f.box("a")
+    val b = f.box("b")
+    // A register the node reports but that does not decode: parsing it, not the job, is what fails.
+    val unreadable = b.copy(additionalRegisters = node.model.NodeRegisters(Map("R4" -> "zz")))
+    f.job.discovered = Seq(a.boxId, b.boxId)
+    f.live = Seq(a, unreadable)
+
+    val bundles = f.scanUntil(f.readCount > 0)
+    bundles should have size 1
+    bundles.head.members.head.inputIds shouldBe Set(a.boxId)
+    f.memory.refusedIds shouldBe Set(b.boxId)
   }
 
   it should "forget a refusal once no scan finds the box any more" in {
@@ -264,14 +312,106 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     f.live = Seq(a)
     f.job.behaviour = FakeJob.Refuse
 
-    f.scanUntil(_.tracked.get("fake").exists(_.nonEmpty))
-    f.request() shouldBe empty
-    f.held().refused shouldBe Set(a.boxId)
+    f.scanUntil(f.job.builds.get == 1) shouldBe empty
+    f.memory.refusedIds shouldBe Set(a.boxId)
 
     // The box changed: its successor has a new id, and the old one is not discovered again.
     f.job.discovered = Seq.empty
-    f.scanUntil(_.tracked.get("fake").contains(Set.empty[String]))
-    f.held().refused shouldBe empty
+    f.scanUntil(f.memory.refusedIds.isEmpty)
+
+    // Were the same id found again it would be a box to try, not a box refused.
+    f.job.discovered = Seq(a.boxId)
+    f.scanUntil(f.job.builds.get == 2)
+  }
+
+  // ─── the retry rule ───────────────────────────────────────────────────────
+
+  "A refused box" should "be offered again after retryAfterScans passes, in case what refused it has passed" in {
+    val f = new Fixture(retryAfterScans = 2)
+    val a = f.box("a")
+    f.job.discovered = Seq(a.boxId)
+    f.live = Seq(a)
+    f.job.behaviour = FakeJob.Throw
+
+    f.scanUntil(f.job.builds.get == 1) shouldBe empty
+    f.memory.passesLeft(a.boxId) shouldBe Some(2)
+
+    // The trouble passes; the box still sits out the passes it was given.
+    f.job.behaviour = FakeJob.Advance
+    f.scanUntil(f.memory.passesLeft(a.boxId).contains(1)) shouldBe empty
+    f.job.builds.get shouldBe 1
+
+    // The second pass lets it through: built again, and this time advanced.
+    val bundles = f.scanUntil(f.job.builds.get == 2)
+    bundles should have size 1
+    bundles.head.members.head.inputIds shouldBe Set(a.boxId)
+    f.memory.refusedIds shouldBe empty
+  }
+
+  it should "sit out as many passes again when it is refused again" in {
+    val f = new Fixture(retryAfterScans = 2)
+    val a = f.box("a")
+    f.job.discovered = Seq(a.boxId)
+    f.live = Seq(a)
+    f.job.behaviour = FakeJob.Refuse
+
+    f.scanUntil(f.job.builds.get == 1) shouldBe empty
+    f.scanUntil(f.memory.passesLeft(a.boxId).contains(1)) shouldBe empty
+    f.scanUntil(f.job.builds.get == 2) shouldBe empty
+    f.memory.passesLeft(a.boxId) shouldBe Some(2)
+    f.request() shouldBe empty
+    f.job.builds.get shouldBe 2
+  }
+
+  // ─── the share ────────────────────────────────────────────────────────────
+
+  /**
+   * Measured, not estimated: what the two jobs' transactions cost the block as signing reports it.
+   * The dear job comes first, so its successor is built and measured before it is left out; were
+   * it second, its floor alone would keep it from being built once the cheap one had the share.
+   */
+  "The share" should "leave out a job whose transaction exceeds maxCost while a cheaper one fits" in {
+    val probe = new Fixture(jobs = 2)
+    val sample = probe.box("a")
+    probe.job.behaviour = FakeJob.Padded(20)
+    val (heavy, light) = probe.nodeContext.getClient.execute { ctx =>
+      val params = ctx.getDataSource.getParameters
+      val input = sample.toInputUTXO(ctx)
+      def cost(job: FakeJob): Long = Upkeep.member(
+        job.build(ctx, input, ctx.getHeight + 1, probe.wallet.contract).get.tx, job.name, input, params).cost
+      (cost(probe.job), cost(probe.other))
+    }
+    heavy should be > light
+
+    val f = new Fixture(jobs = 2, limits = defaultLimits.copy(maxCost = (light + heavy) / 2))
+    val a = f.box("a")
+    val b = f.box("b")
+    f.job.discovered = Seq(a.boxId)
+    f.other.discovered = Seq(b.boxId)
+    f.live = Seq(a, b)
+    f.job.behaviour = FakeJob.Padded(20)
+
+    val bundles = f.scanUntil(f.job.builds.get >= 1 && f.other.builds.get >= 1)
+    bundles should have size 1
+    bundles.head.members.head.kind shouldBe Upkeep.kind("other")
+    bundles.head.members.head.cost shouldBe light
+    // Over the share is not a refusal: the box is tried again next block, when it may fit.
+    f.memory.refusedIds shouldBe empty
+    f.request() should have size 1
+  }
+
+  it should "stop building once maxTxs successors are ready, and leave the rest for a later block" in {
+    val f = new Fixture(limits = defaultLimits.copy(maxTxs = 1))
+    val boxes = Seq("a", "b", "c").map(f.box)
+    f.job.discovered = boxes.map(_.boxId)
+    f.live = boxes
+
+    val bundles = f.scanUntil(f.readCount > 0)
+    bundles should have size 1
+    withClue("every box was built for one slot: ") { f.job.builds.get shouldBe 1 }
+    f.memory.refusedIds shouldBe empty
+    f.request() should have size 1
+    f.job.builds.get shouldBe 2
   }
 
   // ─── the candidate protocol ───────────────────────────────────────────────
@@ -281,41 +421,40 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     val a = f.box("a")
     f.job.discovered = Seq(a.boxId)
     f.live = Seq(a)
-    f.scanUntil(_.tracked.get("fake").exists(_.nonEmpty))
+    f.scanUntil(f.readCount > 0)
+    val built = f.job.builds.get
 
     val height = nextHeight()
-    f.source ! PrepareBlockTxs(height, limits.maxTxs)
+    f.source ! PrepareBlockTxs(height, defaultLimits.maxTxs)
     f.request(height) should have size 1
-    f.job.builds.get shouldBe 1
+    f.job.builds.get shouldBe built + 1
 
     // Prepared once, served from what was prepared.
     f.request(height) should have size 1
-    f.job.builds.get shouldBe 1
+    f.job.builds.get shouldBe built + 1
 
     f.source ! CandidateTxsDropped(height)
     f.request(height) should have size 1
-    f.job.builds.get shouldBe 2
+    f.job.builds.get shouldBe built + 2
   }
 
   "A restarted source" should "not re-offer what was refused in the same run" in {
-    val f = new Fixture(supervised = true)
+    val f = new Fixture(retryAfterScans = 5, supervised = true)
     val a = f.box("a")
     f.job.discovered = Seq(a.boxId)
     f.live = Seq(a)
     f.job.behaviour = FakeJob.Refuse
 
-    f.scanUntil(_.tracked.get("fake").exists(_.nonEmpty))
-    f.request() shouldBe empty
-    f.job.builds.get shouldBe 1
-    f.held().refused shouldBe Set(a.boxId)
+    f.scanUntil(f.job.builds.get == 1) shouldBe empty
+    f.memory.passesLeft(a.boxId) shouldBe Some(5)
 
     f.source ! Kill
-    // A restart empties the actor's own fields; the refusal lives outside them.
-    awaitAssert(f.held().tracked shouldBe empty, 20.seconds, 100.millis)
-    f.held().refused shouldBe Set(a.boxId)
-
-    f.scanUntil(_.tracked.get("fake").exists(_.nonEmpty))
-    f.request() shouldBe empty
+    // A restart empties the actor's own fields; the refusal lives outside them, and the new
+    // incarnation's first pass counts against it like any other.
+    f.memory.refusedIds shouldBe Set(a.boxId)
+    val scans = f.job.discoveries.get
+    f.scanUntil(f.memory.passesLeft(a.boxId).contains(4)) shouldBe empty
+    f.job.discoveries.get should be > scans
     withClue("the new incarnation built the refused box again: ") { f.job.builds.get shouldBe 1 }
   }
 }
