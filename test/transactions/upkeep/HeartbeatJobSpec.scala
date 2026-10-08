@@ -31,7 +31,9 @@ class HeartbeatJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
   private val tip: Long = Parameters.OneErg / 100
   private val tokenId: String = "ab" * 32
 
-  private def id(seed: String): String = (seed * 64).take(64)
+  /** A box id from any seed: the seed's bytes as hex, repeated, so `CanonicalNodeBox` can decode it. */
+  private def id(seed: String): String =
+    (seed.getBytes("UTF-8").map(b => f"$b%02x").mkString * 64).take(64)
 
   /**
    * @param indexed whether the node reports the extra index
