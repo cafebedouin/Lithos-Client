@@ -1,0 +1,89 @@
+package transactions.upkeep
+
+import mutations.NodeWallet
+import node.MutationConversions._
+import node.NodeApi
+import node.model.NodeBox
+import org.ergoplatform.appkit.{BlockchainContext, Parameters}
+import transactions.candidate.{CapitalEntry, CapitalOrigin}
+import work.lithos.mutations.{Contract, InputUTXO, TxBuilder, UTXO}
+
+import java.util.concurrent.atomic.AtomicInteger
+
+/**
+ * A job the specs steer by hand: what it discovers, whether a box is due, and how a build ends.
+ *
+ * Its boxes sit at this wallet's own key so the successor can be signed offline, which is the one
+ * place it departs from a real job. The framework's rule is about which boxes are spent, not whose
+ * key signs, so this still exercises every check the source makes. Counters say what the source
+ * asked for, which is how a spec tells "not built" from "built and dropped".
+ */
+final class FakeJob(wallet: NodeWallet, val name: String = "fake") extends UpkeepJob {
+
+  import FakeJob._
+
+  @volatile var discovered: Seq[String] = Seq.empty
+  @volatile var discoverFails: Boolean = false
+  @volatile var isDue: Boolean = true
+  @volatile var behaviour: Behaviour = Advance
+
+  val discoveries = new AtomicInteger(0)
+  val dueChecks = new AtomicInteger(0)
+  val builds = new AtomicInteger(0)
+
+  override def discover(ctx: BlockchainContext, api: NodeApi, height: Int): Seq[String] = {
+    discoveries.incrementAndGet()
+    if (discoverFails) throw new IllegalStateException("the fake node is down")
+    discovered
+  }
+
+  override def due(box: InputUTXO, height: Int): Boolean = {
+    dueChecks.incrementAndGet()
+    isDue
+  }
+
+  override def build(ctx: BlockchainContext, box: InputUTXO, height: Int,
+                     payTo: Contract): Option[UpkeepJob.Built] = {
+    builds.incrementAndGet()
+    behaviour match {
+      case Advance => Some(advance(ctx, Seq(box), height, payTo))
+      case Refuse => None
+      case Throw => throw new IllegalStateException("the fake job cannot sign")
+      case SpendAlso(extra) => Some(advance(ctx, Seq(box, extra.toInputUTXO(ctx)), height, payTo))
+    }
+  }
+
+  /** Every input recreated `Tip` lighter, and the tips at `payTo`: fee-less, and it balances to zero change. */
+  private def advance(ctx: BlockchainContext, inputs: Seq[InputUTXO], height: Int,
+                      payTo: Contract): UpkeepJob.Built = {
+    val successors = inputs.map(in =>
+      UTXO(in.contract, in.value - Tip, in.tokens, in.registers).setCreationHeight(height))
+    val tip = UTXO(payTo, Tip * inputs.size).setCreationHeight(height)
+    val outputs = successors :+ tip
+    val unsigned = TxBuilder(ctx).setInputs(inputs: _*).setOutputs(outputs: _*).buildTx(0L, wallet.p2pk)
+    val signed = wallet.sign(unsigned)
+    val entry = CapitalEntry(CapitalOrigin.ExecutorReward,
+      InputUTXO(signed.getOutputsToSpend.get(inputs.size)), parentTxId = signed.getId)
+    UpkeepJob.Built(signed, Seq(entry))
+  }
+}
+
+object FakeJob {
+
+  /** What one beat pays, in nanoERG: well over the dust minimum of a token-free box. */
+  final val Tip: Long = Parameters.OneErg / 1000
+
+  sealed trait Behaviour
+
+  /** Build the successor and the tip. */
+  case object Advance extends Behaviour
+
+  /** Say the box cannot be advanced. */
+  case object Refuse extends Behaviour
+
+  /** Fail inside the build. */
+  case object Throw extends Behaviour
+
+  /** Build a successor that also spends a box the job never discovered. */
+  final case class SpendAlso(extra: NodeBox) extends Behaviour
+}

@@ -174,7 +174,7 @@ object Configs {
       "fraction of the block's byte and cost limits this client's package may claim")
     Seq(configs.CandidateSourceConfig.Rollups, configs.CandidateSourceConfig.Emissions,
       configs.CandidateSourceConfig.Rent, configs.CandidateSourceConfig.ErgoDex,
-      configs.CandidateSourceConfig.LithosDex).foreach { source =>
+      configs.CandidateSourceConfig.LithosDex, configs.CandidateSourceConfig.Upkeep).foreach { source =>
       val enabled = v.bool(s"stratum.candidate.sources.$source.enabled")
       val maxTxs = v.range(s"stratum.candidate.sources.$source.maxTxs",
         v.int(s"stratum.candidate.sources.$source.maxTxs"), 0, 100, "transactions inserted per block")
@@ -202,6 +202,26 @@ object Configs {
       "unconfirmed transactions one rollup transaction may carry into the block")
     v.range("stratum.candidate.sources.rent.blocksPerScan",
       v.int("stratum.candidate.sources.rent.blocksPerScan"), 1, 10000, "blocks read per scan pass")
+    v.range("stratum.candidate.sources.upkeep.scanIntervalMs",
+      v.int("stratum.candidate.sources.upkeep.scanIntervalMs"), 1000, 3600000, "ms between upkeep discovery passes")
+    v.range("stratum.candidate.sources.upkeep.maxBoxesPerJob",
+      v.int("stratum.candidate.sources.upkeep.maxBoxesPerJob"), 1, 4096,
+      "box ids one upkeep job may hold between passes")
+    // Jobs are read generically, so this is the one place a misspelt or unknown job name is caught:
+    // enabled, it would otherwise be maintenance the operator expects and never gets.
+    Try(config.getOptional("stratum.candidate.sources.upkeep.jobs")(ConfigLoader.configurationLoader)) match {
+      case Failure(_) =>
+        v.problem("stratum.candidate.sources.upkeep.jobs", "must be a configuration block, one entry per job")
+      case Success(block) => block.foreach { jobs =>
+        val known = transactions.upkeep.UpkeepRegistry.all.map(_.name)
+        jobs.subKeys.toSeq.sorted.foreach { name =>
+          val key = s"stratum.candidate.sources.upkeep.jobs.$name.enabled"
+          if (v.bool(key).contains(true) && !known.contains(name))
+            v.problem(key, s""""$name" is not an upkeep job this client knows. Known: """ +
+              (if (known.isEmpty) "none" else known.mkString(", ")))
+        }
+      }
+    }
     v.bool("stratum.candidate.useTruePropCollection")
     v.bool("stratum.candidate.logTimings")
     v.bool("stratum.candidate.waitForBlockPackage")

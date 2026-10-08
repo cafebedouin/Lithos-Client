@@ -110,6 +110,21 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
         val lithosDexSource = batcherSource(configs.CandidateSourceConfig.LithosDex, lithosDexBatcher)
         val ergoDexSource = batcherSource(configs.CandidateSourceConfig.ErgoDex, ergoDexBatcher)
 
+        // Upkeep: keyless maintenance of other protocols' boxes, off by default and never spending
+        // this wallet. Only the jobs config turns on are handed in, so a source with none is idle.
+        val upkeepLimits = limitsFor(configs.CandidateSourceConfig.Upkeep)
+        val upkeepSource = if (!upkeepLimits.enabled) None else {
+          val upkeepConfig = configs.UpkeepConfig(config)
+          val jobs = transactions.upkeep.UpkeepRegistry.enabled(upkeepConfig)
+          // Built here rather than inside the actor, so every incarnation after a restart shares it
+          // and a refused box is not offered to the node again.
+          val memory = new transactions.upkeep.UpkeepSource.Memory
+          Some(mining.MiningMessages.CandidateSource(configs.CandidateSourceConfig.Upkeep,
+            system.actorOf(akka.actor.Props(new transactions.upkeep.UpkeepSource(
+              nodeConfig, upkeepConfig, upkeepLimits, jobs, memory,
+              stratumParams.candidate.useTruePropCollection)), "upkeep-source")))
+        }
+
         val server = new MiningStratumServer(
           system          = system,
           options         = options,
@@ -130,7 +145,8 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
             mining.MiningMessages.CandidateSource(
               configs.CandidateSourceConfig.Rollups, transactionProcessor),
             mining.MiningMessages.CandidateSource(
-              configs.CandidateSourceConfig.Emissions, emissionHandler)) ++ rentSource ++ lithosDexSource ++ ergoDexSource,
+              configs.CandidateSourceConfig.Emissions, emissionHandler)) ++ rentSource ++ lithosDexSource ++
+            ergoDexSource ++ upkeepSource, // last: it earns the least of the fee-less sources
           rotateExtraNonceInterval = stratumParams.rotateExtraNonceInterval,
           statsCollector = if (statsConfig.enabled) Some(statsCollector) else None,
           statsRefreshIntervalMs = statsConfig.refreshIntervalMs
