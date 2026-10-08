@@ -15,8 +15,11 @@ import play.api.{ConfigLoader, Configuration}
  *                       first this many, so one busy protocol cannot grow the actor's memory or the
  *                       build's node read without bound.
  * @param jobs           each configured job name and whether it is on. Absent is off.
+ * @param heartbeat      what the heartbeat job needs beyond its flag. The one job with settings of
+ *                       its own so far; a job that needs none is just its flag in `jobs`.
  */
-case class UpkeepConfig(scanIntervalMs: Int, maxBoxesPerJob: Int, jobs: Map[String, Boolean]) {
+case class UpkeepConfig(scanIntervalMs: Int, maxBoxesPerJob: Int, jobs: Map[String, Boolean],
+                        heartbeat: HeartbeatConfig = HeartbeatConfig.Default) {
   def jobEnabled(name: String): Boolean = jobs.getOrElse(name, false)
 }
 
@@ -28,7 +31,8 @@ object UpkeepConfig {
   val Default: UpkeepConfig = UpkeepConfig(
     scanIntervalMs = 60000,
     maxBoxesPerJob = 256,
-    jobs = Map.empty)
+    jobs = Map.empty,
+    heartbeat = HeartbeatConfig.Default)
 
   def apply(config: Configuration): UpkeepConfig = {
     def int(key: String, fallback: Int): Int =
@@ -45,6 +49,7 @@ object UpkeepConfig {
     UpkeepConfig(
       scanIntervalMs = int("scanIntervalMs", Default.scanIntervalMs),
       maxBoxesPerJob = int("maxBoxesPerJob", Default.maxBoxesPerJob),
-      jobs = jobs)
+      jobs = jobs,
+      heartbeat = HeartbeatConfig(config))
   }
 }

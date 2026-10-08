@@ -1,6 +1,6 @@
 package transactions.upkeep
 
-import configs.{CandidateConfig, CandidateSourceConfig, UpkeepConfig}
+import configs.{CandidateConfig, CandidateSourceConfig, HeartbeatConfig, UpkeepConfig}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
@@ -73,7 +73,19 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
   "The default" should "leave the source off and no job on" in {
     CandidateConfig.Default.sources(CandidateSourceConfig.Upkeep).enabled shouldBe false
     UpkeepConfig.Default.jobs shouldBe empty
-    UpkeepRegistry.all shouldBe empty
+    UpkeepRegistry.enabled(UpkeepConfig.Default) shouldBe empty
+  }
+
+  "The registry" should "know the heartbeat job, under the name validation checks config against" in {
+    UpkeepRegistry.all(UpkeepConfig.Default).map(_.name) shouldBe UpkeepRegistry.names
+    UpkeepRegistry.names shouldBe Seq("heartbeat")
+    UpkeepRegistry.byName(UpkeepConfig.Default, "heartbeat").map(_.name) shouldBe Some("heartbeat")
+    UpkeepRegistry.byName(UpkeepConfig.Default, "dexy") shouldBe None
+  }
+
+  it should "turn the heartbeat on from config alone" in {
+    val on = UpkeepConfig.Default.copy(jobs = Map("heartbeat" -> true))
+    UpkeepRegistry.enabled(on).map(_.name) shouldBe Seq("heartbeat")
   }
 
   "Job flags" should "be read generically from jobs.<name>.enabled" in {
@@ -101,6 +113,16 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
   }
 
   "A missing jobs block" should "read as no job on" in {
-    UpkeepConfig(Configuration.from(Map("stratum.candidate.sources.upkeep.enabled" -> true))).jobs shouldBe empty
+    val config = UpkeepConfig(Configuration.from(Map("stratum.candidate.sources.upkeep.enabled" -> true)))
+    config.jobs shouldBe empty
+    config.heartbeat shouldBe HeartbeatConfig.Default
+  }
+
+  "The heartbeat's box list" should "be read from jobs.heartbeat.boxIds, and leave the job's flag alone" in {
+    val ids = Seq("ab" * 32, "cd" * 32)
+    val config = UpkeepConfig(Configuration.from(Map(
+      "stratum.candidate.sources.upkeep.jobs.heartbeat.boxIds" -> ids)))
+    config.heartbeat.boxIds shouldBe ids
+    config.jobEnabled("heartbeat") shouldBe false
   }
 }

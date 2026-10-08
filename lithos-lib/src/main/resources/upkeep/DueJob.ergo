@@ -1,0 +1,45 @@
+{
+  // DueJob
+  // A self-describing maintenance box. The box itself states when it is next due and what it pays,
+  // so any executor — a Lithos miner inside its own block, or anyone else — can advance it with no
+  // knowledge of any protocol beyond this script. It is the reference job of the client's upkeep
+  // source, and the answer to whether a box can fully determine its own successor.
+
+  // THE RULE, IN WORDS
+  // The box is due once HEIGHT reaches the last beat (R4) plus the period (R5). A spend of a due
+  // box must recreate it as OUTPUTS(0): the same script, the same tokens, R4 set to this block's
+  // height, R5 and R6 unchanged, and a value of at least the box's value less the tip (R6).
+  // Whatever the successor does not keep, which is at most the tip, belongs to the executor, and
+  // where it goes is not constrained. Nothing else is constrained either, but because every box
+  // under this script looks at OUTPUTS(0), a transaction advances one of them at a time.
+
+  // REGISTERS
+  // R4 Int   height of the last beat; the box is due at R4 + R5
+  // R5 Int   period, in blocks
+  // R6 Long  tip per beat, in nanoERG
+
+  // HOW THE BOX ENDS
+  // There is no owner and no exit path; the first version is keyless end to end. Every beat moves
+  // the tip out, so the value falls by R6 per period until a successor keeping value - R6 could
+  // not hold the consensus minimum for a box of its size. From then on nobody can pay a beat, no
+  // executor spends the box, and it ages out through storage rent like any other box left alone.
+  // A creator funds it for the lifetime wanted and walks away.
+
+  // ASSUMPTIONS
+  // None. The contract takes no constants and reads no other box.
+
+  val successor = OUTPUTS(0)
+  val lastBeat  = SELF.R4[Int].get
+  val period    = SELF.R5[Int].get
+  val tip       = SELF.R6[Long].get
+
+  val due         = HEIGHT >= lastBeat + period
+  val sameScript  = successor.propositionBytes == SELF.propositionBytes
+  val sameTokens  = successor.tokens == SELF.tokens
+  val beatStamped = successor.R4[Int].get == HEIGHT
+  val periodKept  = successor.R5[Int].get == period
+  val tipKept     = successor.R6[Long].get == tip
+  val valueKept   = successor.value >= SELF.value - tip
+
+  sigmaProp(due && sameScript && sameTokens && beatStamped && periodKept && tipKept && valueKept)
+}

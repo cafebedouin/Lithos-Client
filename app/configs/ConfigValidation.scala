@@ -213,13 +213,27 @@ object Configs {
       case Failure(_) =>
         v.problem("stratum.candidate.sources.upkeep.jobs", "must be a configuration block, one entry per job")
       case Success(block) => block.foreach { jobs =>
-        val known = transactions.upkeep.UpkeepRegistry.all.map(_.name)
+        val known = transactions.upkeep.UpkeepRegistry.names
         jobs.subKeys.toSeq.sorted.foreach { name =>
           val key = s"stratum.candidate.sources.upkeep.jobs.$name.enabled"
           if (v.bool(key).contains(true) && !known.contains(name))
             v.problem(key, s""""$name" is not an upkeep job this client knows. Known: """ +
               (if (known.isEmpty) "none" else known.mkString(", ")))
         }
+      }
+    }
+    // The heartbeat's fallback list is read back by id on every scan, so a malformed id would fail
+    // the whole read, and with it every box in the list, on every pass.
+    val heartbeatIds = s"${HeartbeatConfig.Path}.boxIds"
+    Try(config.getOptional(heartbeatIds)(ConfigLoader.seqStringLoader)) match {
+      case Failure(_) => v.problem(heartbeatIds, "must be a list of box ids")
+      case Success(ids) => ids.foreach { list =>
+        list.filterNot(_.matches("[0-9a-fA-F]{64}")).foreach(id =>
+          v.problem(heartbeatIds, s""""$id" is not a box id: expected 64 hex characters"""))
+        if (list.map(_.toLowerCase).distinct.size != list.size)
+          v.problem(heartbeatIds, "lists the same box id more than once")
+        if (list.size > UpkeepConfig.Default.maxBoxesPerJob)
+          v.problem(heartbeatIds, s"lists ${list.size} boxes; at most ${UpkeepConfig.Default.maxBoxesPerJob}")
       }
     }
     v.bool("stratum.candidate.useTruePropCollection")
