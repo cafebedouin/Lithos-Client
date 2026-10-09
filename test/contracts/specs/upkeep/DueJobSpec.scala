@@ -203,7 +203,7 @@ class DueJobSpec extends AnyPropSpec with ContractSpecBase {
    * second input's script refuses. Built exactly as the merge would be: one successor worth the
    * larger box less the tip, and the rest to the spender.
    */
-  property("onlyOne: two due boxes sharing one successor are refused") {
+  property("onlyOne: a due box that is not INPUTS(0) is refused, so two cannot share one successor") {
     withCtx { ctx =>
       val b = beat(ctx, tokens = Seq.empty)
       val smaller = boxValue / 2

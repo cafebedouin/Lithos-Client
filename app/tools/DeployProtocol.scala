@@ -353,9 +353,25 @@ class Deployer(client: ErgoClient,
     }
   }
 
-  private def inclusionHeight(boxId: String): Int =
-    api.indexedBoxById(boxId).get.map(_.inclusionHeight)
-      .getOrElse(throw new IllegalStateException(s"the index does not hold confirmed box $boxId yet"))
+  /**
+   * The height the index records for a confirmed box. The index runs behind the UTXO set by a
+   * little, so a box `awaitConfirmed` has just seen may not be indexed yet: polled, like the
+   * confirmation itself, until the deadline.
+   */
+  private def inclusionHeight(boxId: String): Int = {
+    val deadline = System.currentTimeMillis() + timeoutMs
+    var found: Option[Int] = None
+    while (found.isEmpty) {
+      found = api.indexedBoxById(boxId).toOption.flatten.map(_.inclusionHeight)
+      if (found.isEmpty) {
+        if (System.currentTimeMillis() > deadline)
+          throw new IllegalStateException(s"the index does not hold confirmed box $boxId after ${timeoutMs / 1000}s; " +
+            "is the node started with ergo.node.extraIndex = true?")
+        Thread.sleep(pollMs)
+      }
+    }
+    found.get
+  }
 
   // ─── the steps ────────────────────────────────────────────────────────────
 
