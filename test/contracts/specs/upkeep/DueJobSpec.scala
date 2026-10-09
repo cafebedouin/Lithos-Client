@@ -31,6 +31,9 @@ object DueJobSpec {
  * spend is the one the property names. `rejectsAtSigning` holds the spec to that: a perturbation
  * that merely unbalanced the transaction would fail at build and be reported as such.
  *
+ * The properties for `sane`, `onlyOne` and the Long sum change the box rather than the successor,
+ * since that is what their conditions read; each keeps the rest of the accepted beat as it was.
+ *
  * The beat is at HEIGHT = tip height + 1, the next block, through a preHeader: the script compares
  * against HEIGHT exactly, and the mocked context's own height is one below where a candidate's
  * transactions are validated. The box is funded far above a lifetime of beats, so no negative is
@@ -68,11 +71,17 @@ class DueJobSpec extends AnyPropSpec with ContractSpecBase {
     Beat(ctx, inputAt(standing, ctx, 0), successor, tipOut, height, lastBeat, miner(ctx))
   }
 
+  /** A due-job box with the given terms, standing since `lastBeat`, as the spend's input at `index`. */
+  private def standing(ctx: BlockchainContext, lastBeat: Int, period: Int, tip: Long,
+                       value: Long = boxValue, tokens: Seq[Token] = Seq(token), index: Int = 0): InputUTXO =
+    inputAt(UTXO(dueJob(ctx), value, tokens, regs(lastBeat, period, tip)).setCreationHeight(lastBeat), ctx, index)
+
   /** Fee-less and balanced to zero change, as the client's own block transactions are. */
   private def beatTx(b: Beat)(outputs: Seq[UTXO] = Seq(b.successor, b.tipOut),
-                              height: Int = b.height): UnsignedTransaction =
+                              height: Int = b.height,
+                              inputs: Seq[InputUTXO] = Seq(b.box)): UnsignedTransaction =
     TxBuilder(b.ctx)
-      .setInputs(b.box)
+      .setInputs(inputs: _*)
       .setOutputs(outputs: _*)
       .setPreHeader(b.ctx.createPreHeader().height(height).build())
       .buildTx(0L, b.prover.getAddress)
@@ -128,7 +137,83 @@ class DueJobSpec extends AnyPropSpec with ContractSpecBase {
     }
   }
 
+  /**
+   * R4 + R5 is taken in Long. In Int, a period near `Int.MaxValue` would wrap the sum negative and
+   * make the box due every block, or fail the script outright; in Long the sum is simply a height
+   * no chain reaches, so the box is never due and the spend is refused for that reason alone.
+   */
+  property("due: a box whose R4 + R5 passes Int.MaxValue is not due") {
+    withCtx { ctx =>
+      val b = beat(ctx)
+      val long = Int.MaxValue
+      (b.lastBeat.toLong + long.toLong) should be > Int.MaxValue.toLong
+      val box = standing(ctx, lastBeat = b.lastBeat, period = long, tip = tip)
+      rejectsAtSigning(b.prover, beatTx(b)(
+        outputs = Seq(b.successor.withRegNum(5, ErgoValue.of(long)), b.tipOut),
+        inputs = Seq(box)))
+    }
+  }
+
+  // ─── the box's own terms ──────────────────────────────────────────────────
+
+  /** Due every block under the old rule; a period of zero is no heartbeat, and `sane` refuses it. */
+  property("sane: a box with a period of zero is refused") {
+    withCtx { ctx =>
+      val b = beat(ctx)
+      val box = standing(ctx, lastBeat = b.lastBeat, period = 0, tip = tip)
+      rejectsAtSigning(b.prover, beatTx(b)(
+        outputs = Seq(b.successor.withRegNum(5, ErgoValue.of(0)), b.tipOut),
+        inputs = Seq(box)))
+    }
+  }
+
+  /**
+   * A tip at or above the value is the creator offering the whole box: `valueKept` asks the
+   * successor for nothing, and only the consensus minimum for a box keeps anything in it.
+   */
+  property("valueKept: a tip above the value advances, and all but a box's minimum may be taken") {
+    withCtx { ctx =>
+      val b = beat(ctx)
+      val value = Parameters.OneErg
+      val bigTip = 2L * value
+      val kept = Parameters.MinChangeValue
+      val box = standing(ctx, lastBeat = b.lastBeat, period = period, tip = bigTip, value = value)
+      val successor = b.successor.setValue(kept).withRegNum(6, ErgoValue.of(bigTip))
+      val taken = b.tipOut.setValue(value - kept)
+      accepts(b.prover, beatTx(b)(outputs = Seq(successor, taken), inputs = Seq(box)))
+    }
+  }
+
+  // ─── one box per transaction ──────────────────────────────────────────────
+
+  /**
+   * Two boxes with the same script, tokens, R5 and R6 would each accept the one `OUTPUTS(0)`, and
+   * the spender would keep the second box whole. `onlyOne` holds each box to `INPUTS(0)`, so the
+   * second input's script refuses. Built exactly as the merge would be: one successor worth the
+   * larger box less the tip, and the rest to the spender.
+   */
+  property("onlyOne: two due boxes sharing one successor are refused") {
+    withCtx { ctx =>
+      val b = beat(ctx, tokens = Seq.empty)
+      val smaller = boxValue / 2
+      val second = standing(ctx, lastBeat = b.lastBeat, period = period, tip = tip,
+        value = smaller, tokens = Seq.empty, index = 1)
+      second.id should not be b.box.id
+      val rest = b.tipOut.setValue(smaller + tip)
+      rejectsAtSigning(b.prover, beatTx(b)(outputs = Seq(b.successor, rest), inputs = Seq(b.box, second)))
+    }
+  }
+
   // ─── the successor ────────────────────────────────────────────────────────
+
+  /** Without it a beat would leave the box as close to storage rent as it stood before. */
+  property("freshStamp: a successor keeping the input's creation height is refused") {
+    withCtx { ctx =>
+      val b = beat(ctx)
+      rejectsAtSigning(b.prover, beatTx(b)(
+        outputs = Seq(b.successor.setCreationHeight(b.lastBeat), b.tipOut)))
+    }
+  }
 
   property("beatStamped: a successor whose R4 is not HEIGHT is refused") {
     withCtx { ctx =>
