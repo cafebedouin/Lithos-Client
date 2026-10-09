@@ -53,6 +53,34 @@ object Upkeep {
     (box.bytes.length.toLong,
       accountedCost(inputs = 1, dataInputs = 0, outputs = 1, assets = box.tokens.size + box.tokens.size, params))
 
+  // ─── ordering ─────────────────────────────────────────────────────────────
+
+  /**
+   * What a successor earns the block for the space it takes, known before it is built: the job's
+   * expected revenue against the box's [[floor]]. Ranked per byte first, because bytes are what a
+   * fee-paying transaction would otherwise have used, then per unit of cost.
+   */
+  final case class Worth(revenue: Long, bytes: Long, cost: Long) {
+    def perByte: Double = math.max(0L, revenue).toDouble / math.max(1L, bytes)
+
+    def perCost: Double = math.max(0L, revenue).toDouble / math.max(1L, cost)
+  }
+
+  object Worth {
+    /** A box that cannot be valued: nothing earned, so it goes after every paying one. */
+    val Unknown: Worth = Worth(0L, 1L, 1L)
+  }
+
+  /**
+   * `xs` with the most valuable first. Stable, so boxes worth the same keep the order they came in,
+   * which is the rotation that stops a box deferred at the head from starving the rest. Each worth
+   * is computed once, since it may parse a box.
+   */
+  def byWorth[A](xs: Seq[A])(worth: A => Worth): Seq[A] = {
+    val descending = Ordering.Tuple2(Ordering.Double.reverse, Ordering.Double.reverse)
+    xs.map { x => val w = worth(x); x -> (w.perByte, w.perCost) }.sortBy(_._2)(descending).map(_._1)
+  }
+
   // ─── the candidate path ───────────────────────────────────────────────────
 
   /** One successor ready to be offered, in a bundle of its own so a package can take the others without it. */

@@ -51,6 +51,13 @@ final class HeartbeatJob(boxIds: Seq[String], minTip: Long = HeartbeatJob.Defaul
   /** The height the box is due at, so the source's cap keeps the soonest due. */
   override def priority(box: InputUTXO): Long = Beat.of(box).map(_.dueHeight).getOrElse(Long.MaxValue)
 
+  /**
+   * The R6 tip: the most a beat pays. A box that cannot spare it all pays less, so the tip is an
+   * upper bound, which is all the source's ranking asks for; a box ranked high on a tip it cannot
+   * pay costs one build, not a block's share.
+   */
+  override def expectedRevenue(box: InputUTXO): Long = Beat.of(box).map(_.tip).getOrElse(0L)
+
   override def plan(box: InputUTXO, bc: BuildContext): Option[Successor] =
     Beat.of(box).flatMap { beat =>
       // Sized at the full value, the most a successor could carry, so the floor is never understated.
