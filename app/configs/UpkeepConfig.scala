@@ -40,14 +40,37 @@ import scala.util.{Failure, Success, Try}
  *                        box again. A package the node rejects loses every inserted transaction
  *                        with it, so one bad successor would otherwise cost the block the work of
  *                        every source.
+ * @param space           `fixed` holds the source to its configured share; `opportunistic` lets it
+ *                        grow, block by block, into what the package share would leave empty after
+ *                        the mempool's own demand. Fixed by default, because whether fee-less work
+ *                        should take space at all beyond what the operator set is a policy choice.
+ * @param opportunisticMaxTxs the most successors an opportunistic share admits however empty the
+ *                        block, so a runaway job cannot fill one.
  */
 case class UpkeepConfig(scanIntervalMs: Int, maxBoxesPerJob: Int, retryAfterScans: Int,
                         jobs: Map[String, UpkeepConfig.Job],
                         mode: String,
-                        verifyWithNode: Boolean) {
+                        verifyWithNode: Boolean,
+                        space: String,
+                        opportunisticMaxTxs: Int) {
   def jobEnabled(name: String): Boolean = jobs.get(name).exists(_.enabled)
 
   def observing: Boolean = mode == UpkeepConfig.Observe
+
+  def opportunistic: Boolean = space == UpkeepConfig.Opportunistic
+
+  /**
+   * What the candidate builder lets this source contribute, given its configured `limits`. The
+   * builder bounds every source's answer by its limits again, so an opportunistic share it did not
+   * know of would be cut back to the configured one there. Opportunistic, the count may reach
+   * [[opportunisticMaxTxs]] and bytes and cost are left to the package budget, which the builder
+   * applies to every source together after this; fixed, the limits are returned unchanged. A
+   * configured `maxTxs` of 0 is the builder's sign never to ask the source, so it is kept too.
+   */
+  def allowance(limits: CandidateSourceConfig): CandidateSourceConfig =
+    if (!opportunistic || limits.maxTxs <= 0) limits
+    else limits.copy(maxTxs = math.max(limits.maxTxs, opportunisticMaxTxs),
+      maxBytes = Long.MaxValue, maxCost = Long.MaxValue)
 }
 
 object UpkeepConfig {
@@ -71,6 +94,14 @@ object UpkeepConfig {
   final val Observe = "observe"
 
   final val Modes: Seq[String] = Seq(Candidate, Observe)
+
+  /** The configured share, every block: the default, and the behaviour before `space` existed. */
+  final val Fixed = "fixed"
+
+  /** The configured share, or what the mempool would leave of the package share if that is larger. */
+  final val Opportunistic = "opportunistic"
+
+  final val Spaces: Seq[String] = Seq(Fixed, Opportunistic)
 
   /**
    * One job's block under `jobs.<name>`: the keys every job may carry, read here once for all of
@@ -105,7 +136,9 @@ object UpkeepConfig {
     retryAfterScans = 10,
     jobs = Map.empty,
     mode = Candidate,
-    verifyWithNode = true)
+    verifyWithNode = true,
+    space = Fixed,
+    opportunisticMaxTxs = 20)
 
   def apply(config: Configuration): UpkeepConfig = {
     def int(key: String, fallback: Int): Int =
@@ -126,7 +159,9 @@ object UpkeepConfig {
       jobs = jobs,
       mode = config.getOptional(s"$Path.mode")(ConfigLoader.stringLoader).getOrElse(Default.mode),
       verifyWithNode = config.getOptional(s"$Path.verifyWithNode")(ConfigLoader.booleanLoader)
-        .getOrElse(Default.verifyWithNode))
+        .getOrElse(Default.verifyWithNode),
+      space = config.getOptional(s"$Path.space")(ConfigLoader.stringLoader).getOrElse(Default.space),
+      opportunisticMaxTxs = int("opportunisticMaxTxs", Default.opportunisticMaxTxs))
   }
 
   def validate(v: ConfigValidator, config: Configuration, jobChecks: Seq[UpkeepConfig.JobCheck]): Unit = {
@@ -137,6 +172,12 @@ object UpkeepConfig {
       if (!Modes.contains(mode)) v.problem(s"$Path.mode", s"must be one of ${Modes.mkString(", ")}")
     }
     v.bool(s"$Path.verifyWithNode")
+    v.string(s"$Path.space").foreach { space =>
+      if (!Spaces.contains(space)) v.problem(s"$Path.space", s"must be one of ${Spaces.mkString(", ")}")
+    }
+    // The same ceiling as any source's maxTxs: past it the cap no longer stops a runaway job.
+    v.range(s"$Path.opportunisticMaxTxs", v.int(s"$Path.opportunisticMaxTxs"), 1, 100,
+      "upkeep successors an opportunistic share admits in one block")
     v.range(s"$Path.retryAfterScans", v.int(s"$Path.retryAfterScans"), 1, 100000,
       "discovery passes a refused upkeep box sits out before it is offered again")
     // Jobs are read generically, so this is the one place a misspelt or unknown job name is caught:

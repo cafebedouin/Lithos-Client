@@ -1,5 +1,8 @@
 package transactions.upkeep
 
+import node.NodeApi
+import node.model.{NodeTransaction, Paging}
+import node.rest.NodeCodecs
 import org.ergoplatform.appkit.impl.SignedTransactionImpl
 import org.ergoplatform.appkit.{BlockchainParameters, SignedTransaction}
 import org.ergoplatform.wallet.interpreter.ErgoInterpreter
@@ -7,6 +10,8 @@ import transactions.candidate.BlockTxMessages.CandidateTx
 import transactions.candidate.{CandidateBudget, CandidateBundle, CapitalEntry}
 import transactions.engine.execution.RollupExecution
 import work.lithos.mutations.InputUTXO
+
+import scala.util.Try
 
 /**
  * The pure half of the upkeep source: what a successor costs the block, what a signed successor
@@ -171,6 +176,78 @@ object Upkeep {
 
   object Share {
     def of(maxTxs: Int, budget: CandidateBudget): Share = Share(maxTxs, budget.maxBytes, budget.maxCost)
+  }
+
+  // ─── space ────────────────────────────────────────────────────────────────
+
+  /** Transactions per page when the mempool's demand is read. */
+  final val MempoolPage = 100
+
+  /**
+   * Pages read before the mempool is taken as full. A mempool this deep is not one that leaves a
+   * block empty, and reading it all would put the whole mempool on the path of every build.
+   */
+  final val MaxMempoolPages = 20
+
+  /**
+   * The bytes and cost the transactions waiting in the mempool would claim, read once per build so
+   * upkeep can take only what they leave. Reading stops as soon as the demand reaches `budget` on
+   * either dimension, since nothing past that changes the answer, and a mempool deeper than
+   * [[MaxMempoolPages]] pages is charged as `budget` in full. Every waiting transaction is counted
+   * as demand, which can only overstate it: overstated, upkeep takes less; understated, it would
+   * take space a paying transaction wanted. A failed page fails the read, so the caller can fall
+   * back rather than act on part of the mempool.
+   */
+  def demand(api: NodeApi, budget: CandidateBudget, params: BlockchainParameters): Try[(Long, Long)] = Try {
+    var bytes = 0L
+    var cost = 0L
+    var paging = Paging(0, MempoolPage)
+    var pages = 0
+    var ended = false
+    while (!ended && bytes < budget.maxBytes && cost < budget.maxCost) {
+      if (pages >= MaxMempoolPages) {
+        bytes = math.max(bytes, budget.maxBytes)
+        cost = math.max(cost, budget.maxCost)
+      } else {
+        val page = api.unconfirmedTransactions(paging).get
+        page.foreach { tx =>
+          val (b, c) = weight(tx, params)
+          bytes += b
+          cost += c
+        }
+        ended = page.size < paging.limit
+        paging = paging.next
+        pages += 1
+      }
+    }
+    (bytes, cost)
+  }
+
+  /**
+   * What one waiting transaction claims: the size the node reports, or its encoded length, which is
+   * longer; and the cost the node measured, or, when it reported none, its bytes at the block's own
+   * cost per byte, so a mempool whose costs are unknown is not read as one that costs nothing.
+   */
+  private[upkeep] def weight(tx: NodeTransaction, params: BlockchainParameters): (Long, Long) = {
+    val bytes = tx.size.map(_.toLong).getOrElse(NodeCodecs.encodeTransaction(tx).toString.length.toLong)
+    val cost = tx.cost.getOrElse(bytes * params.getMaxBlockCost.toLong / math.max(1L, params.getMaxBlockSize.toLong))
+    (bytes, cost)
+  }
+
+  /**
+   * The source's share in opportunistic mode: the configured one, or what `pkg` has left after the
+   * mempool's demand when that is larger on both bytes and cost, with the count raised to `maxTxs`.
+   * Never more than the remainder, so upkeep takes only space the waiting transactions leave, and
+   * never less than configured, so the operator's own share is kept when the mempool is full. A
+   * remainder larger on one dimension only means the waiting transactions already claim the other,
+   * and the configured share stands.
+   */
+  def opportunistic(configured: Share, pkg: CandidateBudget, demandBytes: Long, demandCost: Long,
+                    maxTxs: Int): Share = {
+    val left = pkg.less(demandBytes, demandCost)
+    if (left.maxBytes > configured.bytes && left.maxCost > configured.cost)
+      Share(math.max(configured.slots, maxTxs), left.maxBytes, left.maxCost)
+    else configured
   }
 
 }

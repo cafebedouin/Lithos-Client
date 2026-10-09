@@ -6,10 +6,10 @@ import com.typesafe.config.ConfigFactory
 import configs.{CandidateSourceConfig, UpkeepConfig}
 import node.MutationConversions._
 import node.NodeApi
-import node.model.NodeBox
+import node.model.{NodeBox, NodeTransaction, Paging}
 import org.ergoplatform.appkit.Parameters
 import org.mockito.ArgumentMatchers.any
-import org.mockito.Mockito.when
+import org.mockito.Mockito.{never, verify, when}
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
@@ -23,7 +23,7 @@ import transactions.upkeep.UpkeepSource.ScanTick
 import java.util.concurrent.atomic.AtomicInteger
 import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.duration._
-import scala.util.{Failure, Success}
+import scala.util.{Failure, Success, Try}
 
 object UpkeepSourceSpec {
   val config: com.typesafe.config.Config = ConfigFactory.parseString("""
@@ -64,6 +64,9 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
    * @param retryAfterScans passes a refused box sits out; large unless a spec is about the retry
    * @param supervised      under a restarting parent, for the incarnation test
    * @param firstScanDelay  long unless a spec is about the timer, so only the spec's ticks scan
+   * @param space           fixed unless a spec is about the opportunistic share
+   * @param blockShare      the package's fraction of the block, whole for the opportunistic specs so
+   *                        an empty mempool leaves more than any configured share
    */
   private class Fixture(jobs: Int = 1,
                         maxBoxes: Int = UpkeepConfig.Default.maxBoxesPerJob,
@@ -72,7 +75,10 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
                         supervised: Boolean = false,
                         mode: String = UpkeepConfig.Candidate,
                         verifyWithNode: Boolean = true,
-                        firstScanDelay: FiniteDuration = 1.hour) {
+                        firstScanDelay: FiniteDuration = 1.hour,
+                        space: String = UpkeepConfig.Fixed,
+                        opportunisticMaxTxs: Int = UpkeepConfig.Default.opportunisticMaxTxs,
+                        blockShare: Double = 1.0) {
     val api: NodeApi = mock[NodeApi]
     val (nodeContext, _, wallet) = FakeNodeContext(api, numAddresses = 1)
 
@@ -95,17 +101,26 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
 
     def checkCount: Int = checked.synchronized(checked.size)
 
+    /** The mempool the node reports, served a page at a time; a failure fails every page. */
+    @volatile var mempool: Try[Seq[NodeTransaction]] = Success(Seq.empty)
+    val mempoolReads = new AtomicInteger(0)
+    when(api.unconfirmedTransactions(any[Paging])).thenAnswer { inv =>
+      val paging = inv.getArgument[Paging](0)
+      mempoolReads.incrementAndGet()
+      mempool.map(_.slice(paging.offset, paging.offset + paging.limit))
+    }
+
     val job = new FakeJob(wallet)
     val other = new FakeJob(wallet, "other")
     val upkeepConfig: UpkeepConfig = UpkeepConfig.Default.copy(maxBoxesPerJob = maxBoxes,
       retryAfterScans = retryAfterScans, jobs = Map(
         job.name -> UpkeepConfig.Job(enabled = true), other.name -> UpkeepConfig.Job(enabled = true)),
-      mode = mode, verifyWithNode = verifyWithNode)
+      mode = mode, verifyWithNode = verifyWithNode, space = space, opportunisticMaxTxs = opportunisticMaxTxs)
     val enabledJobs: Seq[UpkeepJob] = UpkeepRegistry.enabled(upkeepConfig,
       Seq(job, other).take(jobs).map(fake => JobFactory(fake.name, _ => fake)))
     val memory = new UpkeepSource.Memory(retryAfterScans)
     val props: Props = Props(new UpkeepSource(nodeContext, upkeepConfig, limits.copy(enabled = true),
-      enabledJobs, memory, useTrueProp = false, firstScanDelay = firstScanDelay))
+      enabledJobs, memory, useTrueProp = false, firstScanDelay = firstScanDelay, blockShare = blockShare))
     val probe = TestProbe()
     val source: ActorRef =
       if (!supervised) system.actorOf(props)
@@ -628,6 +643,53 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     f.memory.refusedIds shouldBe empty
     f.request() should have size 1
     f.job.builds.get shouldBe 2
+  }
+
+  // ─── the opportunistic share ──────────────────────────────────────────────
+
+  /** One slot configured, room for three opportunistic ones, and four due boxes to fill them. */
+  private class Space(space: String = UpkeepConfig.Opportunistic)
+    extends Fixture(limits = defaultLimits.copy(maxTxs = 1, maxBytes = 4096L, maxCost = 200000L),
+      space = space, opportunisticMaxTxs = 3) {
+    val boxes: Seq[NodeBox] = Seq("a", "b", "c", "d").map(box)
+    job.discovered = boxes.map(_.boxId)
+    live = boxes
+  }
+
+  /** A waiting transaction larger than any block, so the mempool alone fills the package. */
+  private val crowd = NodeTransaction(id("crowd"), Seq.empty, Seq.empty, Seq.empty,
+    size = Some(Int.MaxValue / 2), cost = Some(Long.MaxValue / 4))
+
+  "The opportunistic share" should "grow into an empty mempool's remainder, up to opportunisticMaxTxs" in {
+    val f = new Space()
+    val bundles = f.scanUntil(f.readCount > 0)
+    bundles should have size 3
+    f.mempoolReads.get should be > 0
+  }
+
+  it should "keep the configured share when the mempool's demand is over the package budget" in {
+    val f = new Space()
+    f.mempool = Success(Seq(crowd))
+    val bundles = f.scanUntil(f.readCount > 0)
+    bundles should have size 1
+    f.mempoolReads.get should be > 0
+  }
+
+  it should "keep the configured share when the mempool cannot be read" in {
+    val f = new Space()
+    f.mempool = Failure(new RuntimeException("the node is busy"))
+    val bundles = f.scanUntil(f.readCount > 0)
+    bundles should have size 1
+    f.memory.refusedIds shouldBe empty
+  }
+
+  "The fixed share" should "never read the mempool" in {
+    val f = new Space(UpkeepConfig.Fixed)
+    val bundles = f.scanUntil(f.readCount > 0)
+    bundles should have size 1
+    f.request() should have size 1
+    verify(f.api, never()).unconfirmedTransactions(any[Paging])
+    verify(f.api, never()).poolHistogram()
   }
 
   // ─── observe mode ─────────────────────────────────────────────────────────
