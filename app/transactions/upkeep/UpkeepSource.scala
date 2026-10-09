@@ -44,10 +44,11 @@ import scala.util.{Failure, Success, Try}
  * is not remembered. In observe mode a request is answered empty at once and the build runs as a
  * task no request waits for, holding nothing back and forgetting nothing.
  *
- * With `space = opportunistic` the build also reads the mempool once. When the transactions waiting
- * there fit in the block beside this client's whole package share (`blockShare` of the node's block
- * limits) and the node's reserve, the count rises to the larger of `maxTxs` and
- * `opportunisticMaxTxs`; bytes and cost stay as configured. See [[Upkeep.opportunistic]].
+ * With `space = opportunistic` the build also reads the mempool once, when there are more due boxes
+ * than slots. When the transactions waiting there fit in the block beside this client's whole
+ * package share (`blockShare` of the node's block limits) and the node's reserve, the count rises to
+ * the larger of `maxTxs` and `opportunisticMaxTxs`; bytes and cost stay as configured. See
+ * [[Upkeep.opportunistic]].
  */
 class UpkeepSource(nodeContext: NodeContext,
                    upkeepConfig: UpkeepConfig,
@@ -124,10 +125,11 @@ class UpkeepSource(nodeContext: NodeContext,
     // A job whose discovery failed is absent from the pass and keeps what it had: stale ids cost
     // one read each and are forgotten by it, while dropping them would lose the boxes until the
     // node recovers.
-    case Scanned(Success(pass)) =>
+    case Scanned(Success((height, pass))) =>
       scanning = false
       tracked ++= pass.map { case (job, found) => job -> found.kept }
       lastFound ++= pass.map { case (job, found) => job -> found.found }
+      memory.seen(pass.values.flatMap(_.found).toSet, height)
       // Holds are kept for every box a pass found, kept under the cap or not: a box the cap left out
       // because it is held must stay held, or it would win the cap again next pass. A job whose
       // discovery failed this pass keeps what it last found, so its holds survive the failure too.
@@ -240,10 +242,11 @@ class UpkeepSource(nodeContext: NodeContext,
    * [[MaxRefusedPerBuild]] refusals, or after [[MaxDeferredPerBuild]] successors were signed and
    * then found not to fit, so a block whose share is nearly spent does not sign every due box for
    * nothing. With `order = rotation` the boxes go in id order (each job's boxes in turn) started at
-   * `blockHeight` modulo their number, as before `order` existed; with `order = value` the due box
-   * unspent the longest goes first, then the rest in order of what their successors would pay per
-   * byte, then per unit of cost, so the share is spent on the best-paying work first and a
-   * lower-paying due box waits while higher-paying due boxes fill the share. Among boxes worth
+   * `blockHeight` modulo their number, as before `order` existed; with `order = value` the due box this
+   * client saw first, of those whose floor fits the share, goes first, then the rest of the due
+   * boxes in order of what their successors would pay per byte, then per unit of cost, so the share
+   * is spent on the best-paying work first and a lower-paying due box waits while higher-paying due
+   * boxes fill the share, at most as many builds as there are due boxes seen before it. Among boxes worth
    * the same the rotation's order is kept. With `remember` off (observe mode) refusals and
    * exhaustion are logged and not held, so every box stays watched.
    */
@@ -271,9 +274,11 @@ class UpkeepSource(nodeContext: NodeContext,
       val ordered = work.flatMap(item => item.offered.toSeq.sorted.flatMap(byId.get)
         .map(box => (item, box, Try(box.toInputUTXO(ctx)))))
       val inTurn = rotated(ordered, blockHeight)
+      // Which boxes are due is asked up front only when something needs it before the loop: the
+      // value order and the read gate. With neither option on, the loop asks as it goes, as before.
       def isDue(entry: (JobWork, NodeBox, Try[InputUTXO])): Boolean =
         entry._3.toOption.exists(input => Try(entry._1.job.due(input, bc.height)).getOrElse(false))
-      val dueNow = inTurn.filter(isDue)
+      lazy val dueNow = inTurn.filter(isDue)
       // The mempool is read only when the extra count could be used: more due boxes than slots.
       val start =
         if (upkeepConfig.opportunistic && dueNow.size > configured.slots) opportunisticShare(bc, configured, blockHeight)
@@ -285,14 +290,15 @@ class UpkeepSource(nodeContext: NodeContext,
       var due = 0
       var deferred = 0
       var signedForNothing = 0
-      // By value: the due box unspent the longest goes first (a waiting box keeps its id and its
-      // creation height, so this is a bound on how long any due box waits, however the set
-      // changes), then the rest by what their successors would pay. Otherwise the plain rotation.
+      // By value: of the due boxes whose floor fits the share, the one this client saw first goes
+      // first (a waiting box keeps its id, and a new box cannot backdate when it was seen, so a due
+      // box that fits waits at most as many builds as there are due boxes seen before it), then the
+      // rest of the due boxes by what their successors would pay. Otherwise the plain rotation.
       val queue = (if (!upkeepConfig.byValue) inTurn else {
-        val first = if (dueNow.isEmpty) Seq.empty else Seq(dueNow.minBy(_._2.creationHeight))
-        first ++ Upkeep.byWorth(inTurn.filterNot(first.contains)) { case (item, _, parsed) =>
-          worth(bc, item.job, parsed)
-        }
+        val worths = dueNow.map(entry => entry -> worth(bc, entry._1.job, entry._3)).toMap
+        val first = Upkeep.headByAge(dueNow)(entry => memory.firstSeenAt(entry._2.boxId),
+          entry => start.affords(worths(entry).bytes, worths(entry).cost)).toSeq
+        first ++ Upkeep.byWorth(dueNow.filterNot(first.contains))(worths)
       }).iterator
       while (!share.full && refused.size < MaxRefusedPerBuild && signedForNothing < MaxDeferredPerBuild &&
         queue.hasNext) {
@@ -508,11 +514,11 @@ class UpkeepSource(nodeContext: NodeContext,
    * as found, so their holds survive the pass. A refused box stays tracked: it sits out a bounded
    * number of passes and is then tried again from where it is.
    */
-  private def scan(): Map[String, Pass] =
+  private def scan(): (Int, Map[String, Pass]) =
     nodeContext.getClient.execute { ctx =>
       val height = ctx.getHeight
       val held = memory.exhaustedIds
-      jobs.flatMap { job =>
+      height -> jobs.flatMap { job =>
         Try(job.discover(ctx, nodeApi, height)) match {
           // The ids the operator listed are kept whatever their number; the cap cuts only the
           // rest, which a job returns in its own priority order.
@@ -581,8 +587,20 @@ object UpkeepSource {
 
     private val refused = new AtomicReference[Map[String, Int]](Map.empty[String, Int])
     private val exhausted = new AtomicReference[Set[String]](Set.empty[String])
+    private val firstSeen = new AtomicReference[Map[String, Int]](Map.empty[String, Int])
 
     def refusedIds: Set[String] = refused.get().keySet
+
+    /**
+     * The height at which this client's scan first saw `id`, or the largest height for one it never
+     * saw. The age the value order ranks on: a waiting box keeps its id, and a new box cannot
+     * backdate what this client saw, unlike the creation height a creator writes into a box.
+     */
+    def firstSeenAt(id: String): Int = firstSeen.get().getOrElse(id, Int.MaxValue)
+
+    /** A pass at `height` found `ids`: the ones not seen before are recorded as first seen now. */
+    def seen(ids: Set[String], height: Int): Unit =
+      firstSeen.set(firstSeen.get() ++ (ids -- firstSeen.get().keySet).map(_ -> height))
 
     def exhaustedIds: Set[String] = exhausted.get()
 
@@ -607,6 +625,7 @@ object UpkeepSource {
     def forget(ids: Set[String]): Unit = {
       refused.set(refused.get() -- ids)
       exhausted.set(exhausted.get() -- ids)
+      firstSeen.set(firstSeen.get() -- ids)
     }
 
     /**
@@ -615,6 +634,7 @@ object UpkeepSource {
      */
     def passed(known: Set[String]): Set[String] = {
       exhausted.set(exhausted.get().intersect(known))
+      firstSeen.set(firstSeen.get().filter { case (id, _) => known.contains(id) })
       val kept = refused.get().filter { case (id, _) => known.contains(id) }
       val (expired, remaining) = kept.partition { case (_, left) => left <= 1 }
       refused.set(remaining.map { case (id, left) => id -> (left - 1) })
@@ -626,7 +646,7 @@ object UpkeepSource {
   private[upkeep] case object ScanTick
 
   /** What one pass found per job; a job whose discovery failed is absent. */
-  private[upkeep] final case class Scanned(result: Try[Map[String, Pass]])
+  private[upkeep] final case class Scanned(result: Try[(Int, Map[String, Pass])])
 
   /** Boxes a build found already spent, so they stop being offered. */
   private[upkeep] final case class Spent(ids: Set[String])

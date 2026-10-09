@@ -6,17 +6,18 @@ count. Both pieces are options, off by default:
 
 | Config | Who sees a change |
 |---|---|
-| unchanged | nobody: the share, the order and the wiring are the upkeep PR's |
-| `order = "value"` | upkeep operators who set it: due boxes are built longest-unspent first, then by what a beat would pay |
+| unchanged | nobody, in what is built: the share, the order and the wiring are the upkeep PR's; each build parses every offered box up front, where it used to stop at a full share |
+| `order = "value"` | upkeep operators who set it: due boxes are tried earliest-seen first, then by what a beat would pay |
 | `space = "opportunistic"` | upkeep operators who set it: more transactions, within the configured bytes and cost, when the mempool leaves room |
 
 ## What
 
 1. **`stratum.candidate.sources.upkeep.order`**: `"rotation"` (default, today's order: due boxes in id order started at
-   the block height) or `"value"`. By value, the due box unspent the longest is built first, which bounds how long any
-   due box waits however the set of boxes changes (a waiting box keeps its id and its creation height), and the rest go
-   in order of expected revenue per floor byte, then per unit of floor cost; a lower-paying due box waits while
-   higher-paying due boxes fill the share. `UpkeepJob` gains `expectedRevenue(box, bc)`, 0 by default; the heartbeat
+   the block height) or `"value"`. By value, of the due boxes whose floor fits the share, the one this client's scan saw first is tried first
+   (a waiting box keeps its id, and a new box cannot backdate when it was seen, unlike the creation height a creator
+   writes into it), so a due box that fits waits at most as many builds as there are due boxes seen before it; the
+   rest of the due boxes go in order of expected revenue per floor byte, then per unit of floor cost, and a
+   lower-paying due box waits while higher-paying due boxes fill the share. `UpkeepJob` gains `expectedRevenue(box, bc)`, 0 by default; the heartbeat
    returns what its beat would actually pay, computed as its plan computes it, never more than the box can pay
    whatever R6 declares (anyone can create a box at the script, and a payment the box cannot make would otherwise buy
    it an early slot for nothing; with `minTip` set, a box that cannot pay it is worth nothing and is declined). The
@@ -24,7 +25,8 @@ count. Both pieces are options, off by default:
 2. **`stratum.candidate.sources.upkeep.space`**: `"fixed"` (default, today's count) or `"opportunistic"`.
    - *What it reads.* When upkeep has more due boxes than slots, the build reads the mempool once (pages of
      `/transactions/unconfirmed`, the first 2,000 waiting transactions, fee or not, 2,000 or more counting as full; up
-     to 20 node calls, within 2 seconds). It counts bytes and cost only.
+     to 20 node calls; a read found past 2 seconds before a page or at its end fails, while a single call that hangs is
+     cut short only by the node client). It counts bytes and cost only, and a figure of zero fails the read.
    - *When it grows.* When what is waiting fits, by the node's figures at the read, in the rest of the block beside
      this client's whole package share (`blockShare` of the block limits) less a reserve for the node's own emission
      and fee transactions, upkeep may take up to the larger of `maxTxs` and `opportunisticMaxTxs` (default 20)
@@ -36,10 +38,13 @@ count. Both pieces are options, off by default:
      every failure the read can detect. Nothing arriving after the read is counted, and offset paging over a mempool
      that changes between pages can skip a transaction. The count is decided once per build: once per height, unless
      that height's package is dropped and rebuilt.
-   - *The hard bound.* The candidate builder's own admission passes stand unchanged, per source on bytes and cost and
-     package-wide after genesis; in opportunistic mode the wiring raises upkeep's builder count alone, so whatever
-     the source does, upkeep never takes more bytes or cost than its configured share, and never more than the
-     package share leaves.
+   - *The hard bound.* The candidate builder's bytes and cost passes stand unchanged, per source and package-wide
+     after genesis; in opportunistic mode the wiring raises upkeep's builder count to the cap in every block, so
+     whatever the source does, upkeep never takes more bytes or cost than its configured share, never more than the
+     package share leaves, and never more transactions than the larger of `maxTxs` and `opportunisticMaxTxs`.
+   - *What it amounts to.* The read is taken at the start of a height, right after a block emptied the mempool, and
+     the count it decides holds for the height. In practice the mode is `maxTxs` raised to the cap with a back-off
+     when the mempool is busy; an operator who wants the count without the back-off can set `maxTxs = 20` today.
 
 ## Why
 
@@ -55,7 +60,7 @@ cap. It cannot know whether a paying transaction arriving later, while the block
 that space. Whether fee-less work should take space a later paying transaction might have used is the maintainer's
 call. That is why the mode is off by default and capped. The order is a second policy, also off by default: a
 lower-paying due box waits while higher-paying ones fill the share, which is what ordering by value means, with the
-longest-unspent due box first so that the wait is bounded; `minTip` on the heartbeat is the operator's bound on free
+earliest-seen due box first so that the wait is bounded; `minTip` on the heartbeat is the operator's bound on free
 beats, and the ranking cannot be bought with a tip a box cannot pay.
 
 Opportunistic mode also reads the mempool. It counts bytes and cost only, and it does not look at what pending
@@ -66,12 +71,12 @@ transactions do, so the upkeep PR's "not extractive" still holds.
 - `UpkeepSpec`: the ordering (per byte, then per cost, stable, no revenue last); the opportunistic count (waiting
   transactions that do not fit keep the configured share, ones that fit raise the count within the configured bytes
   and cost, an exact fit does not fit, the configured count wins over a smaller cap); the demand read (sums, early
-  stop, a full mempool, saturation, a transaction without size or cost failing the read, a later page failing the
-  read, a read past its deadline failing); config defaults, parsing, validation of `space`, `order` and the cap, and
+  stop, a full mempool, saturation, a transaction without size or cost or with a figure of zero failing the read, a
+  later page failing the read, a read past its deadline failing before a page or at its end); the head by age; config defaults, parsing, validation of `space`, `order` and the cap, and
   the builder allowance in isolation.
 - `UpkeepSourceSpec`: with a fixed set of three boxes declaring different revenues (the fake job's `expectedRevenue`;
-  what its build pays is constant) and two slots, by value each height admits the longest-unspent box (a tie, so the
-  rotation's head) and the highest revenue of the rest, and builds only those; by the default order the same boxes
+  what its build pays is constant) and two slots, by value each height admits the earliest-seen box (all seen in one
+  pass, a tie, so the rotation's head) and the highest revenue of the rest, and builds only those; by the default order the same boxes
   are built in rotation order whatever they declare. Opportunistic mode with an empty mempool, or one that fits
   beside the package, takes up to the cap; with waiting transactions that do not fit, or a read failure, the
   configured count; with no more due boxes than slots it does not read the mempool; fixed mode never does. Nothing

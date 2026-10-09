@@ -79,6 +79,13 @@ object Upkeep {
    * `xs` with the most valuable first. Stable, so boxes worth the same keep the order they came in,
    * which is the rotation's order. Each worth is computed once, since it may parse a box.
    */
+  /**
+   * Of `xs`, the entries `fits` accepts, the one `seen` says was seen first; the first of them in
+   * `xs` on a tie, which keeps the rotation's order. None when nothing fits.
+   */
+  def headByAge[A](xs: Seq[A])(seen: A => Int, fits: A => Boolean): Option[A] =
+    xs.filter(fits).reduceOption((a, b) => if (seen(b) < seen(a)) b else a)
+
   def byWorth[A](xs: Seq[A])(worth: A => Worth): Seq[A] = {
     val descending = Ordering.Tuple2(Ordering.Double.reverse, Ordering.Double.reverse)
     xs.map { x => val w = worth(x); x -> (w.perByte, w.perCost) }.sortBy(_._2)(descending).map(_._1)
@@ -181,7 +188,7 @@ object Upkeep {
   /** Transactions per page when the mempool's demand is read. */
   final val MempoolPage = 100
 
-  /** Milliseconds a mempool read may take before it fails and the configured count stands. */
+  /** Milliseconds after which a mempool read fails at its next page boundary or at its end; a single slow call is not cut short. */
   final val ReadTimeoutMs = 2000L
 
   /**
@@ -208,9 +215,10 @@ object Upkeep {
    * paying transaction wanted. The read can still understate: offset paging over a mempool that
    * changes between pages can skip a transaction, and a page shorter than [[MempoolPage]] is taken
    * as the end. A transaction the node reports without a size or a cost fails the read, as does a
-   * page that cannot be read or a read still going at `deadlineMs` (wall clock), so the caller
-   * falls back to the configured count rather than act on a guess, on part of the mempool, or past
-   * the time a build can spare.
+   * page that cannot be read, or a read found past `deadlineMs` (wall clock) before a page is
+   * asked for or when the read ends, so the caller falls back to the configured count rather than
+   * act on a guess, on part of the mempool, or past the time a build can spare. A single call that
+   * hangs is bounded by the node client's own timeout, not by this.
    */
   def demand(api: NodeApi, budget: CandidateBudget, deadlineMs: Long = Long.MaxValue): Try[(Long, Long)] = Try {
     var bytes = 0L
@@ -219,7 +227,11 @@ object Upkeep {
     var pages = 0
     var ended = false
     def saturating(sum: Long, add: Long, cap: Long): Long = if (add >= cap - sum) cap else sum + add
+    def pastDeadline(): Unit =
+      if (System.currentTimeMillis() > deadlineMs)
+        throw new IllegalStateException(s"the mempool read passed its ${ReadTimeoutMs} ms budget after $pages page(s)")
     while (!ended && bytes < budget.maxBytes && cost < budget.maxCost) {
+      pastDeadline()
       if (pages >= MaxMempoolPages) {
         bytes = math.max(bytes, budget.maxBytes)
         cost = math.max(cost, budget.maxCost)
@@ -233,10 +245,9 @@ object Upkeep {
         ended = page.size < paging.limit
         paging = paging.next
         pages += 1
-        if (!ended && System.currentTimeMillis() > deadlineMs)
-          throw new IllegalStateException(s"the mempool read passed its ${ReadTimeoutMs} ms budget after $pages page(s)")
       }
     }
+    pastDeadline()
     (bytes, cost)
   }
 
@@ -247,7 +258,7 @@ object Upkeep {
    * fails the read.
    */
   private[upkeep] def weight(tx: NodeTransaction): (Long, Long) = (tx.size, tx.cost) match {
-    case (Some(bytes), Some(cost)) if bytes >= 0 && cost >= 0L => (bytes.toLong, cost)
+    case (Some(bytes), Some(cost)) if bytes > 0 && cost > 0L => (bytes.toLong, cost)
     case _ => throw new IllegalStateException(s"the node reports no size or cost for ${tx.id}, so the mempool " +
       "cannot be weighed")
   }
@@ -261,7 +272,9 @@ object Upkeep {
    * otherwise the configured share stands. A demand that reaches `rest` exactly does not fit:
    * [[demand]] saturates there, so that figure means "at least this". The growth is in the count
    * only, so the bytes and cost the operator set bound upkeep as in fixed mode, and the candidate
-   * builder's per-source and package passes stand unchanged. A configured count of 0 never grows:
+   * builder's bytes and cost passes stand unchanged; its count for upkeep is the cap in every block
+   * (see `UpkeepConfig.allowance`), so only this check ties the larger count to the mempool. A
+   * configured count of 0 never grows:
    * it is the operator's sign that the source is not to be asked, and the builder would refuse
    * every successor anyway.
    */

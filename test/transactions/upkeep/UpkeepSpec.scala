@@ -239,8 +239,14 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
   }
 
   it should "saturate at the budget rather than wrap on absurd figures" in {
-    val (api, _) = mempoolOf((1 to 3).map(n => waiting(n, Some(Int.MaxValue), Some(Long.MaxValue / 2))))
-    Upkeep.demand(api, packageBudget) shouldBe Success((packageBudget.maxBytes, packageBudget.maxCost))
+    // each figure is below the budget; their sum would wrap a plain Long
+    val (api, _) = mempoolOf((1 to 3).map(n => waiting(n, Some(10), Some(Long.MaxValue / 2 - 1L))))
+    Upkeep.demand(api, packageBudget) shouldBe Success((30L, packageBudget.maxCost))
+  }
+
+  it should "fail the read on a figure of zero, which no real transaction has" in {
+    an[IllegalStateException] should be thrownBy Upkeep.weight(waiting(1, Some(0), Some(10L)))
+    an[IllegalStateException] should be thrownBy Upkeep.weight(waiting(1, Some(10), Some(0L)))
   }
 
   it should "stop reading once the demand reaches the budget" in {
@@ -257,10 +263,19 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     pages.get shouldBe Upkeep.MaxMempoolPages
   }
 
-  it should "fail a read still going at its deadline, rather than hold the build" in {
+  it should "fail a read found past its deadline before a page or at its end, rather than hold the build" in {
     val (api, _) = mempoolOf((1 to 250).map(n => waiting(n, Some(10), Some(10L))))
     Upkeep.demand(api, packageBudget, deadlineMs = System.currentTimeMillis() - 1L).isFailure shouldBe true
+    val (short, _) = mempoolOf((1 to 5).map(n => waiting(n, Some(10), Some(10L))))
+    Upkeep.demand(short, packageBudget, deadlineMs = System.currentTimeMillis() - 1L).isFailure shouldBe true
     Upkeep.demand(api, packageBudget, deadlineMs = System.currentTimeMillis() + 60000L) shouldBe Success((2500L, 2500L))
+  }
+
+  "The head by age" should "be the earliest-seen entry that fits, the first on a tie, or none" in {
+    val seen = Map("a" -> 5, "b" -> 3, "c" -> 3, "d" -> 1)
+    Upkeep.headByAge(Seq("a", "b", "c", "d"))(seen, _ != "d") shouldBe Some("b")
+    Upkeep.headByAge(Seq("c", "b", "a"))(seen, _ => true) shouldBe Some("c")
+    Upkeep.headByAge(Seq("a", "b"))(seen, _ => false) shouldBe None
   }
 
   it should "fail when a later page cannot be read, rather than count the pages before it" in {
@@ -422,7 +437,7 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       .getOrElse(fail("an unknown order was accepted")) should include("upkeep.order")
   }
 
-  it should "leave the builder's allowance alone when fixed, and widen it to the cap when opportunistic" in {
+  "The space" should "leave the builder's allowance alone when fixed, and widen it to the cap when opportunistic" in {
     val limits = CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 5)
     UpkeepConfig.Default.allowance(limits) shouldBe limits
     val widened = UpkeepConfig.Default.copy(space = UpkeepConfig.Opportunistic, opportunisticMaxTxs = 12).allowance(limits)
