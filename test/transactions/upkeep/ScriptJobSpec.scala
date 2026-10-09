@@ -282,6 +282,26 @@ class ScriptJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     }
   }
 
+  it should "throw on a plan with an output at the fee proposition" in {
+    val f = new Fixture()
+    f.client.execute { ctx =>
+      f.job.feeOutput = FakeScriptJob.Tip / 2
+      val thrown = the[IllegalArgumentException] thrownBy
+        f.job.build(f.scriptBox("a").toInputUTXO(ctx), BuildContext(ctx, ctx.getHeight + 1, f.wallet.contract))
+      thrown.getMessage should include("fee")
+    }
+  }
+
+  it should "throw on a plan whose revenue is not at this miner's collection contract" in {
+    val f = new Fixture()
+    f.client.execute { ctx =>
+      f.job.tipTo = Some(Contract.SIGMA_TRUE)
+      val thrown = the[IllegalArgumentException] thrownBy
+        f.job.build(f.scriptBox("a").toInputUTXO(ctx), BuildContext(ctx, ctx.getHeight + 1, f.wallet.contract))
+      thrown.getMessage should include("collection")
+    }
+  }
+
   "The build context" should "read the node's parameters and network from the context it is made from" in {
     val f = new Fixture()
     f.client.execute { ctx =>

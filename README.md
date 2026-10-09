@@ -172,12 +172,25 @@ out. Until your miner finds a block there is nothing to see upkeep do, so it has
 stratum.candidate.sources.upkeep.mode = "observe"
 ```
 Upkeep then answers every block request empty and, in the background, builds what it would have offered, asks
-your node to check each transaction (up to `maxTxs` checks per block) and logs the verdict.
+your node to check each transaction (up to `maxTxs` checks per block) and logs the verdict. Observe mode keeps no
+memory, and needs the source and a job enabled; the heartbeat has boxes to observe on testnet (see below), none on
+mainnet yet.
 
-Upkeep never spends your ERG: the shipped job spends only boxes at its own script, signs with no key, and pays no
-fee, and the client refuses a job's transaction that spends a box the job did not report. It does not look at pending
-transactions to choose its work; it reads boxes back through the node's mempool-adjusted view, so a box someone else is
-already spending is skipped. A box whose build fails is set aside and tried again after
+**Creating a due-job box.** A due-job box is any box at the heartbeat's script holding three registers: R4 the
+height of the last beat (`Int`), R5 the period in blocks (`Int`, positive), R6 the tip per beat in nanoERG (`Long`,
+not negative). The script's address is `BLeBj4M5DTjaKjyEUwPF8JE7b6E4haYuHXwms5Rhf7mCThPdAnTdwPBHVTugWGXSgRzyt156JiWMSp31zuw3J3Vagvw1XGHQf1K7AUULYm64u8yWm6qVNpBQ3vBUWZS3tBkAExSYVFWz54M38YaZbVPLnPUx9HMNpnPiqzTz6Si1AQCPKUXUJS14aCTFc4TfF6RiqeEn2jUfH`
+on testnet and `2gXTNpGs3kytbjbWSS8G5uhdZCm9CkBBFKVz1jQ5uosE3S4JmWuQmoCHuxvTEP8ybf8syM8z17h5oe26FkKcMUDgFH1tE2Ru8QwAfrG1qp94rwr2CcB7pz79M6WYhTeRzW36LcA5QX7zGZvqPREduzSoX1NL7Zn2JLusiPyUreTvwpC5iyBEAcaP9tfLF4rLVMz5SvFfV68FG`
+on mainnet (the tree `HeartbeatJob.TreeHex`, the same on both). Fund it with the tips you want paid plus the box's
+own minimum; a box paid down to its minimum is beaten for free (or declined, with `minTip` set) until storage rent
+takes it. Registers of other types, a zero period or a negative tip lock the box until storage rent: there is no
+owner and no exit, so check the registers before sending. On testnet, box
+`e5d9d2c29f7be9914c604c8102c6f08839cdd01c006c312c1596c144fe6d8fe1` (period 720, tip 0.01 ERG) is live.
+
+The shipped `heartbeat` job never spends your ERG: it spends only boxes at its own script, signs with a prover that
+holds no key, and pays no fee. The client also refuses any job's transaction that spends a box at one of your wallet's
+keys or a box the job did not report. Upkeep's only use of the mempool is to skip a box a pending transaction already
+spends; it never reads what pending transactions do, and it never builds on unconfirmed outputs. Observe mode keeps no
+memory and needs the source and a job enabled. A box whose build fails is set aside and tried again after
 `retryAfterScans` discovery passes; a box that cannot pay its successor is set aside until it changes.
 
 ## KYA

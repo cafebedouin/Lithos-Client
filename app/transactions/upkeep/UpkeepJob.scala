@@ -14,9 +14,12 @@ import work.lithos.mutations.{Contract, InputUTXO}
  * at one script extends [[ScriptJob]]; this trait is for one that does not fit that shape.
  *
  * A job must spend only the boxes it discovered, with no wallet input and no fee output, and its
- * successor is fixed by the box and the height. The source enforces the first against what the job
- * reported; the rest is enforced by review, and by [[ScriptJob]] for the jobs that extend it. "Not yet" belongs in [[due]] and "cannot pay" in
- * [[build]], since a box `build` declines is held until a scan stops finding it. A job need not
+ * successor must be a fixed function of the box and the height. The source enforces the first two
+ * against what the job reported and against this wallet's keys; [[ScriptJob]] also makes the box
+ * the only input, the fee zero and the revenue outputs this miner's; nothing checks that the
+ * successor is fixed by the box and the height, review does. "Not yet" belongs in [[due]] and
+ * "cannot pay" in [[build]], since a box `build` declines is held until a scan stops finding it.
+ * A job need not
  * count what it builds, because the source sizes and fits every successor, but it is reviewed
  * before it is registered, because the rest is taken on trust.
  */

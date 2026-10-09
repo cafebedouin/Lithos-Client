@@ -31,10 +31,11 @@ import work.lithos.mutations.{Contract, InputUTXO, UTXO}
  * successor and the beat is made for free, which the script allows and which keeps the box alive.
  * A box worth less than its own successor's minimum cannot be advanced at all and is declined, so
  * the source holds it rather than offer a transaction the node would refuse. With `minTip` set, a
- * box offering less than that is not this job's to maintain, so an operator can decline free beats.
+ * box offering less than that is not this job's to maintain, and a box that offers enough but
+ * cannot pay it is declined and held until it changes, so an operator can refuse free beats.
  *
  * @param boxIds the ids listed in config, maintained on every node
- * @param minTip the smallest R6 tip a box must offer to be maintained; 0 maintains every box
+ * @param minTip the smallest tip a beat must pay, in nanoERG; 0 maintains every box and beats for free
  */
 final class HeartbeatJob(boxIds: Seq[String], minTip: Long = 0L) extends ScriptJob(boxIds) {
 
@@ -57,13 +58,17 @@ final class HeartbeatJob(boxIds: Seq[String], minTip: Long = 0L) extends ScriptJ
       val successorFloor = ScriptJob.minimumValue(successor(box, beat, bc.height, box.value), bc)
       // Below its own successor's minimum the box cannot be recreated at all: declined, not built.
       if (box.value < successorFloor) None else Some(beat)
-    }.map { beat =>
+    }.flatMap { beat =>
       val successorFloor = ScriptJob.minimumValue(successor(box, beat, bc.height, box.value), bc)
       val paid = math.max(0L, math.min(beat.tip, box.value - successorFloor))
       val tipOut = UTXO(bc.payTo, paid).setCreationHeight(bc.height)
-      if (paid > 0L && paid >= ScriptJob.minimumValue(tipOut, bc))
-        Successor(Seq(successor(box, beat, bc.height, box.value - paid), tipOut), revenue = Seq(1))
-      else Successor(Seq(successor(box, beat, bc.height, box.value)))
+      val paysItsOwnBox = paid > 0L && paid >= ScriptJob.minimumValue(tipOut, bc)
+      // With minTip set, a beat that would pay less than that is declined, free beats included; the
+      // box is then held until it changes, as any box that cannot pay is.
+      if (minTip > 0L && (!paysItsOwnBox || paid < minTip)) None
+      else if (paysItsOwnBox)
+        Some(Successor(Seq(successor(box, beat, bc.height, box.value - paid), tipOut), revenue = Seq(1)))
+      else Some(Successor(Seq(successor(box, beat, bc.height, box.value))))
     }
 
   /** The box as its script demands it back: same script and tokens, R4 at `height`, R5 and R6 kept. */

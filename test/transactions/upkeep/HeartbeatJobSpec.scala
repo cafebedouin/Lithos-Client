@@ -278,7 +278,7 @@ class HeartbeatJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     HeartbeatJob.Factory.check(play.api.Configuration.empty) shouldBe empty
   }
 
-  it should "build nothing for a box whose registers are not a beat" in {
+  "A build of a malformed box" should "build nothing for a box whose registers are not a beat" in {
     val f = new Fixture()
     f.client.execute { ctx =>
       val malformed = f.dueBox("a", registers = Seq(ErgoValue.of(1000L), ErgoValue.of(period), ErgoValue.of(tip)))

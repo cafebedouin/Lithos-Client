@@ -148,7 +148,10 @@ class UpkeepSource(nodeContext: NodeContext,
       if (upkeepConfig.observing) {
         replyTo ! BlockTxsReady(blockHeight, Seq.empty[CandidateBundle])
         observe(blockHeight)
-      } else preparation.preparedFor(blockHeight).filterNot(_ => refresh) match {
+      } else preparation.preparedFor(blockHeight) match {
+        // A refresh at the same height is answered from what was prepared: a successor is a fixed
+        // function of its box and the height, so rebuilding would sign the same transactions and
+        // ask the node the same checks again, inside the deadline every source shares.
         case Some(bundles) => replyTo ! BlockTxsReady(blockHeight, bundles)
         case None => startBuild(blockHeight, Some(replyTo))
       }
@@ -215,6 +218,7 @@ class UpkeepSource(nodeContext: NodeContext,
         }
       }.toVector
       val byId = live.map(box => box.boxId -> box).toMap
+      val treeOf = byId.map { case (id, box) => id -> box.ergoTree }
       val gone = ids.toSet -- byId.keySet
       if (gone.nonEmpty) self ! Spent(gone)
 
@@ -232,7 +236,7 @@ class UpkeepSource(nodeContext: NodeContext,
       while (!share.full && refused.size < MaxRefusedPerBuild && signedForNothing < MaxDeferredPerBuild &&
         queue.hasNext) {
         val (item, box) = queue.next()
-        attempt(bc, item, box, share) match {
+        attempt(bc, item, box, share, treeOf) match {
           case Attempt.Ready(successor, admitted) =>
             due += 1
             share = admitted
@@ -254,6 +258,9 @@ class UpkeepSource(nodeContext: NodeContext,
       }
       if (remember && refused.nonEmpty) self ! Refused(refused)
       if (remember && exhausted.nonEmpty) self ! Exhausted(exhausted)
+      if (!remember && exhausted.nonEmpty)
+        logger.info(s"Upkeep observe at $blockHeight: ${exhausted.size} box(es) cannot pay for a successor: " +
+          exhausted.toSeq.sorted.map(_.take(8)).mkString(", "))
       if (refused.size >= MaxRefusedPerBuild && queue.hasNext)
         logger.warn(s"Upkeep stopped building at $blockHeight after $MaxRefusedPerBuild refusals; " +
           "the boxes not yet tried wait for a later block")
@@ -304,7 +311,8 @@ class UpkeepSource(nodeContext: NodeContext,
    * call into the job is caught, so a throw on one box costs only that box. A box whose bytes do not
    * hash to the id the node gave is refused, since a transaction from it would spend nothing real.
    */
-  private def attempt(bc: BuildContext, item: JobWork, box: NodeBox, share: Upkeep.Share): Attempt = {
+  private def attempt(bc: BuildContext, item: JobWork, box: NodeBox, share: Upkeep.Share,
+                      treeOf: Map[String, String]): Attempt = {
     val job = item.job
     Try(box.toInputUTXO(bc.ctx)) match {
       case Failure(ex) => Attempt.Refused(s"the box cannot be read: ${ex.getMessage}")
@@ -318,7 +326,7 @@ class UpkeepSource(nodeContext: NodeContext,
           if (!share.affords(floorBytes, floorCost))
             Attempt.Deferred(s"at least ${floorBytes}B and $floorCost cost, over the " +
               s"${share.bytes}B and ${share.cost} cost left of the share")
-          else build(bc, item, input) match {
+          else build(bc, item, input, treeOf) match {
             case Left(outcome) => outcome
             case Right(successor) => share.admit(successor) match {
               case Some(admitted) => Attempt.Ready(successor, admitted)
@@ -334,17 +342,22 @@ class UpkeepSource(nodeContext: NodeContext,
 
   /**
    * The job's successor for one due box, sized, or why there is none: [[Attempt.Exhausted]] when
-   * the job says the box cannot pay, [[Attempt.Refused]] when the build throws or spends a box the
-   * job never discovered.
+   * the job says the box cannot pay, [[Attempt.Refused]] when the build throws, spends a box the
+   * job never discovered, or spends a box at one of this wallet's keys.
    */
-  private def build(bc: BuildContext, item: JobWork, input: InputUTXO): Either[Attempt, Upkeep.Prepared] =
+  private def build(bc: BuildContext, item: JobWork, input: InputUTXO,
+                    treeOf: Map[String, String]): Either[Attempt, Upkeep.Prepared] =
     Try(item.job.build(input, bc)).flatMap[Either[Attempt, Upkeep.Prepared]] {
       case None => Success(Left(Attempt.Exhausted))
       case Some(built) => Try {
         val foreign = Upkeep.undiscoveredInputs(built.tx, item.discovered)
+        val ours = Upkeep.walletInputs(built.tx, treeOf, nodeContext.getNodeWallet.signableTrees)
         if (foreign.nonEmpty)
           Left(Attempt.Refused(s"its successor spends ${foreign.size} box(es) the job never discovered: " +
             foreign.mkString(", ")))
+        else if (ours.nonEmpty)
+          Left(Attempt.Refused(s"its successor spends ${ours.size} box(es) at this wallet's keys: " +
+            ours.mkString(", ")))
         else Right(Upkeep.Prepared(item.job.name, input.id.toString,
           Upkeep.member(built.tx, item.job.name, input, bc.params), built.capital))
       }
@@ -511,8 +524,11 @@ object UpkeepSource {
     /** Built, measured and admitted; `share` is what is left after it. */
     final case class Ready(successor: Upkeep.Prepared, share: Upkeep.Share) extends Attempt
     case object NotDue extends Attempt
-    /** Due, but not this block: nothing is wrong with the box, the share has no room for it. */
-    /** `built` when the successor was signed before it was found not to fit, which the build counts. */
+    /**
+     * Due, but not this block: nothing is wrong with the box, the share has no room for it, or an
+     * admitted successor already spends its box. `built` when the successor was signed before that
+     * was found, which the build counts.
+     */
     final case class Deferred(reason: String, built: Boolean = false) extends Attempt
     /** Due, and the job says the box cannot pay for its successor. */
     case object Exhausted extends Attempt

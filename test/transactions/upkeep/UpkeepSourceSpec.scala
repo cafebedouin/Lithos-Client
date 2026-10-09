@@ -15,6 +15,7 @@ import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import support.{CanonicalNodeBox, FakeNodeContext, RestartingSupervisor}
+import work.lithos.mutations.Contract
 import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
 import transactions.candidate.CandidateBundle
 import transactions.upkeep.UpkeepSource.ScanTick
@@ -114,8 +115,12 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
         probe.expectMsgType[RestartingSupervisor.Child].ref
       }
 
-    /** A box at this wallet's own key, carrying the id its bytes commit to, so the fake job can sign it. */
+    /** An anyone-can-spend box carrying the id its bytes commit to, so the fake job can sign it with no key. */
     def box(seed: String): NodeBox =
+      CanonicalNodeBox(id(seed), id(seed), Parameters.OneErg, 0, 100, Contract.SIGMA_TRUE.ergoTreeHex)
+
+    /** A box at this wallet's own key: what no upkeep transaction may spend, whatever a job reports. */
+    def walletBox(seed: String): NodeBox =
       CanonicalNodeBox(id(seed), id(seed), Parameters.OneErg, 0, 100, wallet.contract.ergoTreeHex)
 
     def request(height: Int = nextHeight()): Seq[CandidateBundle] = {
@@ -163,7 +168,7 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
 
   // ─── off, or nothing to do ────────────────────────────────────────────────
 
-  /** A source with nothing to do is never created, so it makes no node read and holds no timer. */
+  /** The predicate `StartMiningServer` uses to decide whether a source exists at all. */
   "The wiring" should "start a source only when it is enabled and config turns on a job" in {
     val (_, _, wallet) = FakeNodeContext(mock[NodeApi], numAddresses = 1)
     val job = new FakeJob(wallet)
@@ -360,6 +365,32 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     f.job.builds.get shouldBe UpkeepSource.MaxDeferredPerBuild
     f.memory.refusedIds shouldBe empty
     f.memory.exhaustedIds shouldBe empty
+  }
+
+  /** Whatever a job reports, nothing it builds may spend the operator's ERG. */
+  it should "refuse a successor that spends a box at this wallet's keys, even one the job discovered" in {
+    val f = new Fixture()
+    val mine = f.walletBox("w")
+    f.job.discovered = Seq(mine.boxId)
+    f.live = Seq(mine)
+    f.scanUntil(f.job.builds.get >= 1) shouldBe empty
+    f.memory.refusedIds shouldBe Set(mine.boxId)
+  }
+
+  /** A refresh at the same height is answered from what was prepared, not rebuilt. */
+  it should "answer a refresh at the same height from what it prepared" in {
+    val f = new Fixture()
+    val a = f.box("a")
+    f.job.discovered = Seq(a.boxId)
+    f.live = Seq(a)
+    f.scanUntil(f.job.builds.get >= 1) should have size 1
+    val built = f.job.builds.get
+    val height = nextHeight()
+    f.source ! PrepareBlockTxs(height, defaultLimits.maxTxs)
+    awaitAssert(f.job.builds.get shouldBe built + 1, 20.seconds, 100.millis)
+    f.probe.send(f.source, RequestBlockTxs(height, defaultLimits.maxTxs, refresh = true))
+    f.probe.expectMsgType[BlockTxsReady].bundles should have size 1
+    f.job.builds.get shouldBe built + 1
   }
 
   it should "treat a build that throws as refused" in {

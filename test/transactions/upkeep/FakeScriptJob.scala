@@ -33,6 +33,12 @@ final class FakeScriptJob(boxIds: Seq[String] = Seq.empty, val name: String = "s
   /** NanoERG the plan leaves unspent, which [[ScriptJob]] must refuse. */
   @volatile var leftOver: Long = 0L
 
+  /** Where the plan sends the tip: `bc.payTo` unless set, which [[ScriptJob]] must refuse as revenue. */
+  @volatile var tipTo: Option[Contract] = None
+
+  /** Add an output at the fee proposition, which [[ScriptJob]] must refuse. */
+  @volatile var feeOutput: Long = 0L
+
   /** Each box's priority by id; zero, the default, for any other. */
   @volatile var priorities: Map[String, Long] = Map.empty
 
@@ -49,7 +55,8 @@ final class FakeScriptJob(boxIds: Seq[String] = Seq.empty, val name: String = "s
     else Some(Successor(
       outputs = Seq(
         UTXO(box.contract, box.value - Tip, box.tokens, box.registers).setCreationHeight(bc.height),
-        UTXO(bc.payTo, Tip - leftOver).setCreationHeight(bc.height)),
+        UTXO(tipTo.getOrElse(bc.payTo), Tip - leftOver - feeOutput).setCreationHeight(bc.height)) ++
+        (if (feeOutput > 0L) Seq(UTXO(Contract.FEE, feeOutput).setCreationHeight(bc.height)) else Seq.empty),
       dataInputs = dataInputs,
       revenue = revenue))
 }

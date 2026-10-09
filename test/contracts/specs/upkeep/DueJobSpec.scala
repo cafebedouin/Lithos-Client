@@ -167,14 +167,19 @@ class DueJobSpec extends AnyPropSpec with ContractSpecBase {
     }
   }
 
-  /** A negative tip is nonsense the box would carry forever; `sane` refuses it. */
+  /**
+   * A negative tip is nonsense the box would carry forever; `sane` refuses it. Differential: with
+   * tip -1 `valueKept` asks the successor to keep one nanoERG more than the box held, so a second,
+   * plain input funds exactly that, and `sane` is the one condition left to fail.
+   */
   property("sane: a box with a negative tip is refused") {
     withCtx { ctx =>
       val b = beat(ctx)
       val box = standing(ctx, lastBeat = b.lastBeat, period = period, tip = -1L)
-      rejectsAtSigning(b.prover, beatTx(b)(
-        outputs = Seq(b.successor.withRegNum(6, ErgoValue.of(-1L))),
-        inputs = Seq(box)))
+      val funding = inputAt(UTXO(Contract.SIGMA_TRUE, Parameters.OneErg).setCreationHeight(b.lastBeat), ctx, 1)
+      val richer = UTXO(dueJob(ctx), boxValue + 1L, Seq(token), regs(b.height, period, -1L)).setCreationHeight(b.height)
+      val change = UTXO(Contract.SIGMA_TRUE, Parameters.OneErg - 1L).setCreationHeight(b.height)
+      rejectsAtSigning(b.prover, beatTx(b)(outputs = Seq(richer, change), inputs = Seq(box, funding)))
     }
   }
 

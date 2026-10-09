@@ -13,10 +13,10 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * A job the specs steer by hand: what it discovers, whether a box is due, and how a build ends.
  *
- * Its boxes sit at this wallet's own key so the successor can be signed offline, which is the one
- * place it departs from a real job. The framework's rule is about which boxes are spent, not whose
- * key signs, so this still exercises every check the source makes. Counters say what the source
- * asked for, which is how a spec tells "not built" from "built and dropped".
+ * Its boxes are anyone-can-spend, so the successor can be signed offline by the wallet's prover
+ * without a key being asked for; a spec that wants the source's wallet check to fire hands it a box
+ * at the wallet's own key instead. Counters say what the source asked for, which is how a spec
+ * tells "not built" from "built and dropped".
  */
 final class FakeJob(wallet: NodeWallet, val name: String = "fake") extends UpkeepJob {
 

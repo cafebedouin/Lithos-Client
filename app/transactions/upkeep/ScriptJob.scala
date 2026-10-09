@@ -41,7 +41,8 @@ final case class Successor(outputs: Seq[UTXO],
  *    confirmed boxes at the script in the index's ascending order (1,000 boxes), then lowest
  *    [[priority]] first among those. Boxes beyond that window are not seen on that pass, so a
  *    script anyone may pay into can be crowded by older boxes whatever their due height; the
- *    configured list below is the operator's guarantee for the boxes that matter.
+ *    configured list below is how an operator makes sure particular boxes are seen, until their
+ *    next beat gives them new ids.
  *    On every node, indexed or not, the ids under `jobs.<name>.boxIds`, each read from the UTXO set
  *    with one `boxById` call, so an unconfirmed box is never spent without its parent. That list is
  *    not a fallback: its boxes come first and are never cut. A box is kept only if it sits at the
@@ -147,11 +148,17 @@ object ScriptJob {
   /**
    * The plan assembled and signed: `box` the only input, no fee, the block's height in the
    * preHeader, an empty proof from a prover with no secret, and the revenue declared as capital.
+   * A plan with an output at the fee proposition, or revenue at anything but `bc.payTo`, is
+   * refused here, so a job cannot pay a fee or send this miner's revenue elsewhere.
    */
   private def signed(job: String, box: InputUTXO, successor: Successor, bc: BuildContext): UpkeepJob.Built = {
     require(successor.revenue.forall(i => i >= 0 && i < successor.outputs.size),
       s"$job's revenue ${successor.revenue.mkString(", ")} names an output the plan does not have " +
         s"(${successor.outputs.size} outputs)")
+    require(!successor.outputs.exists(_.contract.ergoTreeHex == Contract.FEE.ergoTreeHex),
+      s"$job's plan has an output at the fee proposition; block transactions pay no fee")
+    require(successor.revenue.forall(i => successor.outputs(i).contract.ergoTreeHex == bc.payTo.ergoTreeHex),
+      s"$job's plan declares revenue at an output that is not this miner's collection contract")
     val spent = successor.outputs.map(_.value).sum
     require(spent == box.value,
       s"$job's plan spends $spent of the box's ${box.value} nanoERG; it must spend all of it")

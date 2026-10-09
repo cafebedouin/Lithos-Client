@@ -40,9 +40,9 @@ object Configs {
   /**
    * Every config block the client reads, checked at once. `upkeepJobs` is what the upkeep registry
    * offers (`UpkeepRegistry.checks`), handed in by the caller so that this package depends on no
-   * job; with none given, an enabled upkeep job is refused as unknown.
+   * job; an enabled upkeep job not among them is refused as unknown.
    */
-  def validateAll(config: Configuration, upkeepJobs: Seq[UpkeepConfig.JobCheck] = Seq.empty): Unit = {
+  def validateAll(config: Configuration, upkeepJobs: Seq[UpkeepConfig.JobCheck]): Unit = {
     val v = new ConfigValidator(config)
     v.bool("stats.enabled")
     val statsRefresh = v.range("stats.refreshIntervalMs", v.int("stats.refreshIntervalMs"),

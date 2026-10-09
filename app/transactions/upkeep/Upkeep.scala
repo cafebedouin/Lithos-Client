@@ -80,10 +80,20 @@ object Upkeep {
   /**
    * The inputs a job signed that it did not report from discovery. Empty for an acceptable
    * transaction. The check is against what the job reported, so it holds a job to its own word;
-   * what keeps the wallet out is [[ScriptJob]], which discovers only boxes at the job's script.
+   * [[walletInputs]] is the check against this wallet, and [[ScriptJob]] discovers only boxes at
+   * the job's script.
    */
   def undiscoveredInputs(signed: SignedTransaction, discovered: Set[String]): Set[String] =
     RollupExecution.signedInputIds(signed) -- discovered
+
+  /**
+   * The inputs a job signed that sit at one of this wallet's keys: `treeOf` is the script of every
+   * box the build read back, by id, and `wallet` the P2PK trees the prover can sign for. Empty for
+   * an acceptable transaction: whatever a job reports, no upkeep transaction spends the operator's
+   * ERG. An input the build did not read back is caught by [[undiscoveredInputs]].
+   */
+  def walletInputs(signed: SignedTransaction, treeOf: Map[String, String], wallet: Set[String]): Set[String] =
+    RollupExecution.signedInputIds(signed).filter(id => treeOf.get(id).exists(wallet.contains))
 
   // ─── fitting ──────────────────────────────────────────────────────────────
 

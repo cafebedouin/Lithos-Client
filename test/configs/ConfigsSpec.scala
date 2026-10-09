@@ -4,6 +4,7 @@ import com.typesafe.config.ConfigFactory
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import play.api.Configuration
+import transactions.upkeep.UpkeepRegistry
 
 /** Verifies that startup validation accepts shipped configuration and aggregates invalid keys. */
 class ConfigsSpec extends AnyFlatSpec with Matchers {
@@ -12,7 +13,7 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     Configuration(ConfigFactory.parseResources("application.conf").resolve())
 
   "Configs.validateAll" should "accept the shipped application.conf" in {
-    try Configs.validateAll(shipped)
+    try Configs.validateAll(shipped, UpkeepRegistry.checks)
     catch {
       case t: ConfigValidationException => fail(t.getMessage)
     }
@@ -21,14 +22,14 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
   it should "reject negative candidate revenue thresholds" in {
     val configured = Configuration(ConfigFactory.parseString("stratum.candidate.minCandidateChangeRevenue = -1")
       .withFallback(shipped.underlying).resolve())
-    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured, UpkeepRegistry.checks)
     thrown.getMessage should include("stratum.candidate.minCandidateChangeRevenue")
   }
 
   it should "reject a protocol refresh count of zero, which would take every refresh" in {
     val configured = Configuration(ConfigFactory.parseString("stratum.candidate.minNewProtocolTxs = 0")
       .withFallback(shipped.underlying).resolve())
-    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured, UpkeepRegistry.checks)
     thrown.getMessage should include("stratum.candidate.minNewProtocolTxs")
   }
 
@@ -36,10 +37,10 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     def withPins(pins: Int): Configuration = Configuration(ConfigFactory.parseString(
       s"stratum.candidate.pinnedInputs = $pins").withFallback(shipped.underlying).resolve())
     Seq(0, 1, 16).foreach { pins =>
-      withClue(s"pinnedInputs $pins: ")(noException should be thrownBy Configs.validateAll(withPins(pins)))
+      withClue(s"pinnedInputs $pins: ")(noException should be thrownBy Configs.validateAll(withPins(pins), UpkeepRegistry.checks))
     }
     Seq(-1, 17).foreach { pins =>
-      val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(withPins(pins))
+      val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(withPins(pins), UpkeepRegistry.checks)
       thrown.getMessage should include("stratum.candidate.pinnedInputs")
     }
   }
@@ -48,10 +49,10 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     def withCap(cap: Int): Configuration = Configuration(ConfigFactory.parseString(
       s"stratum.candidate.sources.rollups.maxAncestorTxs = $cap").withFallback(shipped.underlying).resolve())
     Seq(0, 4, 64).foreach { cap =>
-      withClue(s"maxAncestorTxs $cap: ")(noException should be thrownBy Configs.validateAll(withCap(cap)))
+      withClue(s"maxAncestorTxs $cap: ")(noException should be thrownBy Configs.validateAll(withCap(cap), UpkeepRegistry.checks))
     }
     Seq(-1, 65).foreach { cap =>
-      val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(withCap(cap))
+      val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(withCap(cap), UpkeepRegistry.checks)
       thrown.getMessage should include("stratum.candidate.sources.rollups.maxAncestorTxs")
     }
   }
@@ -62,9 +63,9 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
       .withFallback(shipped.underlying).resolve())
     Seq(true -> 0, true -> 2, true -> 5, false -> 1).foreach { case (enabled, maxTxs) =>
       withClue(s"rent enabled=$enabled maxTxs=$maxTxs: ")(
-        noException should be thrownBy Configs.validateAll(withRent(enabled, maxTxs)))
+        noException should be thrownBy Configs.validateAll(withRent(enabled, maxTxs), UpkeepRegistry.checks))
     }
-    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(withRent(enabled = true, 1))
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(withRent(enabled = true, 1), UpkeepRegistry.checks)
     thrown.getMessage should include("stratum.candidate.sources.rent.maxTxs")
   }
 
@@ -72,10 +73,10 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     def withAge(age: Int): Configuration = Configuration(
       ConfigFactory.parseString(s"stratum.candidate.clearanceAge = $age").withFallback(shipped.underlying).resolve())
     Seq(100, 7200, 14400).foreach { age =>
-      withClue(s"clearanceAge $age: ")(noException should be thrownBy Configs.validateAll(withAge(age)))
+      withClue(s"clearanceAge $age: ")(noException should be thrownBy Configs.validateAll(withAge(age), UpkeepRegistry.checks))
     }
     Seq(0, 99, 14401).foreach { age =>
-      val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(withAge(age))
+      val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(withAge(age), UpkeepRegistry.checks)
       thrown.getMessage should include("stratum.candidate.clearanceAge")
     }
   }
@@ -85,9 +86,9 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
       ConfigFactory.parseString(s"""stratum.candidate.collateralStrategy = "$strategy"""")
         .withFallback(shipped.underlying).resolve())
     CandidateConfig.CollateralStrategies.foreach { strategy =>
-      withClue(s"strategy $strategy: ")(noException should be thrownBy Configs.validateAll(withStrategy(strategy)))
+      withClue(s"strategy $strategy: ")(noException should be thrownBy Configs.validateAll(withStrategy(strategy), UpkeepRegistry.checks))
     }
-    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(withStrategy("oldest"))
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(withStrategy("oldest"), UpkeepRegistry.checks)
     thrown.getMessage should include("stratum.candidate.collateralStrategy")
   }
 
@@ -95,10 +96,10 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     def withMultiplier(m: Int): Configuration = Configuration(
       ConfigFactory.parseString(s"stratum.reductionMultiplier = $m").withFallback(shipped.underlying).resolve())
     StratumConfig.ReductionMultipliers.foreach { m =>
-      withClue(s"multiplier $m: ")(noException should be thrownBy Configs.validateAll(withMultiplier(m)))
+      withClue(s"multiplier $m: ")(noException should be thrownBy Configs.validateAll(withMultiplier(m), UpkeepRegistry.checks))
     }
     Seq(0, 1, 50, 100000).foreach { m =>
-      val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(withMultiplier(m))
+      val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(withMultiplier(m), UpkeepRegistry.checks)
       thrown.getMessage should include("stratum.reductionMultiplier")
     }
   }
@@ -114,7 +115,7 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     val configured = Configuration(ConfigFactory.parseString(
       "stats.refreshIntervalMs = 15000\nstats.staleAfterMs = 1000")
       .withFallback(shipped.underlying).resolve())
-    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured, UpkeepRegistry.checks)
     thrown.getMessage should include("stats.staleAfterMs")
     an[ConfigValidationException] should be thrownBy StatsConfig(configured)
     StatsConfig(shipped) shouldBe StatsConfig.Default
@@ -129,7 +130,7 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
         |stats.dex.historyPages = 0
         |stats.dex.timestampLookups = 251""".stripMargin)
       .withFallback(shipped.underlying).resolve())
-    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured, UpkeepRegistry.checks)
     Seq("staleAfterMs", "readTimeoutMs", "refreshBudgetMs", "historyPages", "timestampLookups")
       .foreach(key => thrown.getMessage should include(s"stats.dex.$key"))
     an[ConfigValidationException] should be thrownBy StatsConfig(configured)
@@ -145,13 +146,13 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
         |stats.storage.pruning.intervalMs = 0
         |stats.storage.pruning.batchSize = 1441""".stripMargin)
       .withFallback(shipped.underlying).resolve())
-    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured, UpkeepRegistry.checks)
     Seq("backend", "path", "flushIntervalMs", "sampleIntervalMinutes", "pruning.retentionDays",
       "pruning.intervalMs", "pruning.batchSize").foreach(key => thrown.getMessage should include(s"stats.storage.$key"))
     an[ConfigValidationException] should be thrownBy StatsConfig(configured)
     val noPruning = Configuration(ConfigFactory.parseString("stats.storage.pruning.enabled = false")
       .withFallback(shipped.underlying).resolve())
-    noException should be thrownBy Configs.validateAll(noPruning)
+    noException should be thrownBy Configs.validateAll(noPruning, UpkeepRegistry.checks)
     StatsConfig(noPruning).storage.pruningEnabled shouldBe false
   }
 
@@ -173,7 +174,7 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
         |batching.lithosdex.strategy = "maxFee"
         |batching.lithosdex.searchBudgetMs = -1""".stripMargin)
       .withFallback(shipped.underlying).resolve())
-    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured, UpkeepRegistry.checks)
     Seq("scanIntervalMs", "autoFlush", "skippedOrderTtlMs", "maxSkippedOrders", "maxAncestorTxs",
       "broadcastMempoolOrders", "maxMempoolOrders", "maxMempoolOrdersPerTx", "maxUnbuildablePerRun", "maxUnbuildablePerTx",
       "discoverPools", "maxTrackedPools", "strategy", "searchBudgetMs")
@@ -183,7 +184,7 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
   it should "name the known strategies when a batching strategy is misspelled" in {
     val configured = Configuration(ConfigFactory.parseString("batching.ergodex.strategy = \"maxfees\"")
       .withFallback(shipped.underlying).resolve())
-    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured, UpkeepRegistry.checks)
     thrown.getMessage should include("batching.ergodex.strategy")
     thrown.getMessage should include(transactions.batching.RunStrategy.Default.name)
   }
@@ -199,7 +200,7 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
         |batching.ergodex.maxUnbuildablePerTx = 0
         |batching.ergodex.searchBudgetMs = 10001""".stripMargin)
       .withFallback(shipped.underlying).resolve())
-    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured, UpkeepRegistry.checks)
     Seq("skippedOrderTtlMs", "maxSkippedOrders", "maxAncestorTxs", "broadcastMempoolOrders",
       "maxMempoolOrdersPerTx", "maxUnbuildablePerRun", "maxUnbuildablePerTx", "searchBudgetMs")
       .foreach(key => thrown.getMessage should include(s"batching.ergodex.$key"))
@@ -211,7 +212,7 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
         |wallet.consolidation.request-timeout-ms = 0
         |wallet.consolidation.num-transactions = 0""".stripMargin)
       .withFallback(shipped.underlying).resolve())
-    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured, UpkeepRegistry.checks)
     Seq("attempt-timeout-ms", "request-timeout-ms", "num-transactions")
       .foreach(key => thrown.getMessage should include(s"wallet.consolidation.$key"))
   }
@@ -222,7 +223,7 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
       """wallet.inventory-walk-timeout-ms = 600000
         |wallet.consolidation.attempt-timeout-ms = 600000""".stripMargin)
       .withFallback(shipped.underlying).resolve())
-    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured, UpkeepRegistry.checks)
     thrown.getMessage should include("wallet.consolidation.attempt-timeout-ms")
     thrown.getMessage should include("wallet.inventory-walk-timeout-ms")
   }
@@ -231,28 +232,28 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     val configured = Configuration(ConfigFactory.parseString(
       "sync.quarantine.checkpointIntervalBlocks = 1")
       .withFallback(shipped.underlying).resolve())
-    noException should be thrownBy Configs.validateAll(configured)
+    noException should be thrownBy Configs.validateAll(configured, UpkeepRegistry.checks)
   }
 
   it should "reject a quarantine repair timeout below the supported floor" in {
     val configured = Configuration(ConfigFactory.parseString(
       "sync.quarantine.repairTimeout = 500 milliseconds")
       .withFallback(shipped.underlying).resolve())
-    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured, UpkeepRegistry.checks)
     thrown.getMessage should include("sync.quarantine.repairTimeout")
   }
 
   it should "reject a blank stratum.bindAddress, which the JDK would resolve to loopback" in {
     val configured = Configuration(ConfigFactory.parseString("""stratum.bindAddress = " """")
       .withFallback(shipped.underlying).resolve())
-    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured, UpkeepRegistry.checks)
     thrown.getMessage should include("stratum.bindAddress")
   }
 
   it should "reject a stratum.bindAddress written with its port" in {
     val configured = Configuration(ConfigFactory.parseString("""stratum.bindAddress = "127.0.0.1:4444"""")
       .withFallback(shipped.underlying).resolve())
-    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured, UpkeepRegistry.checks)
     thrown.getMessage should include("stratum.bindAddress")
   }
 
@@ -260,14 +261,14 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     Seq("127.0.0.1", "::1", "::").foreach { address =>
       val configured = Configuration(ConfigFactory.parseString(s"""stratum.bindAddress = "$address"""")
         .withFallback(shipped.underlying).resolve())
-      withClue(address)(noException should be thrownBy Configs.validateAll(configured))
+      withClue(address)(noException should be thrownBy Configs.validateAll(configured, UpkeepRegistry.checks))
     }
   }
 
   it should "name every required key missing from an empty configuration" in {
     // Required keys are those read without an application default.
     val thrown = the[ConfigValidationException] thrownBy
-      Configs.validateAll(Configuration(ConfigFactory.empty()))
+      Configs.validateAll(Configuration(ConfigFactory.empty()), UpkeepRegistry.checks)
     val message = thrown.getMessage
 
     List(
@@ -308,7 +309,7 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
   it should "reject an apiKeyHash that is the key rather than its hash" in {
     // A plaintext key must be reported even when the configuration has other errors.
     val thrown = the[ConfigValidationException] thrownBy
-      Configs.validateAll(Configuration(ConfigFactory.parseString("""lithos.apiKeyHash = "hello"""")))
+      Configs.validateAll(Configuration(ConfigFactory.parseString("""lithos.apiKeyHash = "hello"""")), UpkeepRegistry.checks)
     thrown.getMessage should include("lithos.apiKeyHash")
   }
 
@@ -322,7 +323,7 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
       emission.maxLenderKeys = 64
     """).resolve())
 
-    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(broken)
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(broken, UpkeepRegistry.checks)
     val message = thrown.getMessage
 
     List(

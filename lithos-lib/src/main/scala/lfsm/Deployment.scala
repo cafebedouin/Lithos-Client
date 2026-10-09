@@ -85,10 +85,13 @@ object DeploymentIds {
   /**
    * The public mainnet deployment, from the constants in [[LFSMHelpers]].
    *
-   * Mainnet has no FP control address constant: the box lives under `FP_Control_Mainnet`, which takes
-   * no constants, so its address is compiled. Lazy because compiling at object initialisation would
-   * put a script compile in front of anything that merely names this object.
+   * Mainnet has no FP control address constant in [[LFSMHelpers]]: the box lives under
+   * `FP_Control_Mainnet`, which takes no constants. Its address is pinned here as a constant, so that
+   * reaching any mainnet id compiles nothing; `DeployPlanSpec` holds the compiled script to it.
    */
+  final val FpControlMainnetAddress: String =
+    "GPp4BycDwAwoCGQnA3QC1UQyqNuB2UxG6KMiRFioBqwo1kAUaqKwQZL1RQ8nZz1jN4EmYt6XVuWUXMzxiXja5FwxiUmCcxHGfrNjeSbVroaxrnKqHMqKwsgzMUAz5yMErBNW8x84n3c9BzcF"
+
   lazy val mainnet: DeploymentIds = DeploymentIds(
     lit = LFSMHelpers.LIT_ID_MAINNET,
     emissionNft = LFSMHelpers.EMISSION_NFT_MAINNET,
@@ -100,7 +103,7 @@ object DeploymentIds {
     voteToken = LFSMHelpers.VOTE_TOKEN_MAINNET,
     mdGenesisId = LFSMHelpers.MD_GENESIS_ID_MAINNET,
     mdGenesisHeight = LFSMHelpers.MD_GENESIS_HEIGHT_MAINNET,
-    fpControlAddress = RollupContracts.mkFPControlMainnetContract(NetworkType.MAINNET).address(NetworkType.MAINNET))
+    fpControlAddress = Address.create(FpControlMainnetAddress))
 
   /** The public testnet deployment, from the constants in [[LFSMHelpers]]. */
   lazy val testnet: DeploymentIds = DeploymentIds(

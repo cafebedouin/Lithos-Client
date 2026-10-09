@@ -26,9 +26,12 @@ most the tip leaves). Its tree is pinned in `HeartbeatJob.TreeHex`, and a spec h
 it on mainnet and testnet. It pays what the box can spare, up to the tip, to the miner's collection output
 as capital the holding top-up aggregates, and beats for free when that is too small for a box of its own.
 A beat is valid in exactly one block, the one whose height it is stamped with, so "anyone" means anyone building
-for the next height; a non-miner can broadcast one and have it land in that block. `jobs.heartbeat.minTip` lets an
-operator decline boxes offering less than a chosen tip, free beats included. No due-job box exists on mainnet yet. Lithos itself has mined about 30 mainnet blocks so far (heights 1,888,828 to
-1,890,575, about 1.7% of blocks over that span), so upkeep carried only in Lithos blocks waits about 60 blocks today.
+for the next height; a non-miner can broadcast one, paying any fee out of the tip, and it is valid only if the very
+next block includes it. `jobs.heartbeat.minTip` makes the job decline any beat that would pay less than that, free
+beats included: a box offering less is not maintained, a box offering enough that cannot pay it is held until it
+changes. No due-job box exists on mainnet yet; the README says how to create one, and testnet has one. Lithos itself has mined about 30 mainnet blocks so far (heights 1,888,828 to
+1,890,575, about 1.7% of blocks over that span), so upkeep carried only in Lithos blocks waits at least about 60 blocks today,
+and longer while few Lithos miners enable it.
 
 ### Running on a private chain
 
@@ -45,8 +48,10 @@ are what let the source be tested end to end on a devnet rather than on mainnet:
   fund operator keys with ERG and LIT. One transaction per step, each waited for. `DEVNET.md` documents both.
 
 A spec pins every protocol contract's tree on mainnet and testnet (`test/resources/deployment/contract-pins.txt`)
-so that neither piece can move a mainnet tree unnoticed, and checks that an override reaches every contract
-that compiles an id in and nothing else.
+so that neither piece can move a mainnet tree unnoticed; the pins were recorded from the base commit's own
+compiler and this branch matches them. A second spec checks that an override reaches the thirteen contracts that
+compile an id in and leaves `payout` and the other network unchanged. Reaching any mainnet id compiles nothing: the
+one address mainnet has no constant for is pinned too.
 
 ## Why
 
@@ -69,10 +74,11 @@ Upkeep never looks at pending transactions to decide what to build. Its read-bac
 mempool-adjusted view, so a box a pending transaction already spends is dropped until the next scan; a spend
 that reaches the mempool after the read-back loses to this miner's own block, as with any block producer.
 
-A job's transaction may only spend boxes that job reported from discovery; the source refuses one that
-spends anything else, which holds a job to its own word. The shipped job reports only boxes at its own
-script and signs with no key and no fee, so it cannot spend the operator's wallet; a job that implements
-`UpkeepJob` directly is held to that by review.
+A job's transaction may only spend boxes that job reported from discovery, and never a box at one of this
+wallet's keys; the source refuses either. `ScriptJob` also makes the box the only input, refuses a fee output,
+and refuses revenue declared at anything but this miner's collection contract. The shipped job reports only boxes
+at its own script and signs with a prover that holds no key. The miner takes the tip another executor would
+otherwise have earned in that block, which is the ordinary block-producer advantage.
 
 ## Limits
 
@@ -85,8 +91,9 @@ script and signs with no key and no fee, so it cannot spend the operator's walle
   there, due or not, hide every newer one from an indexed client, and a beat gives a real box a newer index.
   Configured `boxIds` are never cut (at most 256 per job, each a read on every scan), but on a plain node
   they go stale after each beat, since the successor has a new id and a plain node cannot follow a spend.
-- A refresh rebuilds the source's work for the height, as the rent source does. A build signs at most 16
-  successors it then cannot fit, and stops after 16 refusals.
+- A refresh at the same height is answered from what was prepared: a successor is a fixed function of its box
+  and the height. A build signs at most 16 successors it then cannot fit, and stops after 16 refusals. The
+  read-back is up to 16 node calls of 256 boxes, in the build that starts when the height is known.
 - With `useTruePropCollection`, the tip output is anyone-can-spend until the holding top-up in the same
   package takes it, as the rent source's capital is.
 
@@ -100,8 +107,8 @@ script and signs with no key and no fee, so it cannot spend the operator's walle
 
 ## Testing
 
-- **Observe mode** (`stratum.candidate.sources.upkeep.mode = "observe"`) lets this be watched on mainnet before
-  any Lithos block carries it: every request is answered empty at once, and in the background the source
+- **Observe mode** (`stratum.candidate.sources.upkeep.mode = "observe"`) lets this be watched before any Lithos block carries it (there is
+  no due-job box on mainnet yet; testnet has one): every request is answered empty at once, and in the background the source
   builds and sizes everything as for a block, puts each successor through the node's `/transactions/check`
   (up to `maxTxs` checks per block) and logs the verdict.
 - `UpkeepSpec`: the pure half — the node's cost accounting and the floor's token term against the node's own
@@ -129,17 +136,19 @@ script and signs with no key and no fee, so it cannot spend the operator's walle
   the pinned one, an override reaches every contract that compiles an id in and leaves `payout` and the other
   network alone, and it is not served from a cache filled before it was installed.
 - `DueJobSpec`: the contract through the interpreter, offline — a due box advances, one block early is
-  refused, every condition of the script refused on the field it reads, two boxes sharing one successor
-  refused, a stale creation height refused, a zero period refused, a tip above the value taking all but a
-  box's minimum, and R4 + R5 computed in Long.
-- End to end. A due-job box is live on testnet (`e5d9d2c2…`, period 720, tip 0.01 ERG). On a private chain
+  refused, every condition of the script refused on the field it reads (a zero period and a negative tip for
+  `sane`), a second due-job box in the same transaction refused, a stale creation height refused, a tip above
+  the value taking all but a box's minimum, and a box whose R4 + R5 passes `Int.MaxValue` refused.
+- End to end. A due-job box is live on testnet (`e5d9d2c29f7be9914c604c8102c6f08839cdd01c006c312c1596c144fe6d8fe1`,
+  period 720, tip 0.01 ERG; observe it with the config in the README, `mode = "observe"`, against a testnet node
+  started with `extraIndex`). On a private chain
   with 20-second blocks, one command of a test rig goes from a wiped chain to a block the
   client built: the deployer deploys the protocol, the client joins the collateral queue with its own ERG and
   LIT, and a block carries the client's genesis transaction and the upkeep beat together, the beat accepted
   by the node's check (which runs the node's stateful validation at its next height, not the mempool's fee
   floor) and the block by consensus. The rig (topology, node settings, an `/info` rewriting proxy for appkit,
   a CPU miner) is a test rig outside this repository; `DEVNET.md` says what any private-chain run needs.
-- `sbt test` on Java 17: 2,784 tests, all passing (run with the stacked follow-on included). One spec outside this
-  change, `state.persistence.SnapshotFallbackSpec`, is load-sensitive: its first LevelDB open can exceed TestKit's
+- `sbt test` on Java 17 at this branch's head: see the count in the final paragraph. One spec outside this change,
+  `state.persistence.SnapshotFallbackSpec`, is load-sensitive: its first LevelDB open can exceed TestKit's
   3-second expectation when the host is busy, and eight of its cases then fail together without this change. A
   separate one-line PR gives it the 20 s the other actor specs allow.

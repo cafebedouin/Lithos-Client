@@ -17,7 +17,10 @@
   // be positive and the tip not negative, or the box never advances. Whatever the successor does not
   // keep, which is at most the tip, belongs to the executor, and where it goes is not constrained.
   // The fresh creation height is what makes a beat reset the storage-rent clock: a successor stamped
-  // with an old height would be as close to rent as the box it replaced.
+  // with an old height would be as close to rent as the box it replaced. Because R4 and the creation
+  // height must both equal HEIGHT, a beat transaction is valid in exactly one block and can never be
+  // included later; and a late beat moves the schedule, since the next due height counts from the
+  // beat, not from when the box was due.
 
   // REGISTERS
   // R4 Int   height of the last beat; the box is due at R4 + R5, computed in Long
@@ -38,11 +41,12 @@
   // WHAT THE SCRIPT LEAVES FREE
   // Only OUTPUTS(0)'s script, tokens, R4 to R6, creation height and value are constrained. Its R7 to
   // R9, every other output, the other inputs and the data inputs are free: an executor may attach
-  // registers to the successor (raising its minimum value until the next beat drops them) and may
-  // put the tip anywhere, including a fee.
+  // registers to the successor, raising its minimum value (a later beat may drop them, as the
+  // reference job does, or keep them), and may put the tip anywhere, including a fee.
 
   // ASSUMPTIONS
-  // None. The contract takes no constants and reads no other box.
+  // None. The contract takes no compile-time constants; it reads SELF, OUTPUTS(0) and INPUTS(0)'s
+  // id, and no data input.
 
   val successor = OUTPUTS(0)
   val lastBeat  = SELF.R4[Int].get

@@ -17,7 +17,8 @@ import scala.util.{Failure, Success, Try}
  * @param maxBoxesPerJob  box ids one job may hold between passes beyond its configured ones. A job
  *                        that finds more keeps the first this many in its own priority order, so
  *                        one busy protocol cannot grow the actor's memory or the build's node read
- *                        without bound.
+ *                        without bound. Validation also holds each configured list to this number
+ *                        and to [[UpkeepConfig.MaxConfiguredBoxes]].
  * @param retryAfterScans discovery passes a box whose build was refused sits out before it is
  *                        offered again. A refusal may be the box's own doing or the moment's — a
  *                        node that could not be read — and the source cannot tell which, so it
@@ -28,11 +29,15 @@ import scala.util.{Failure, Success, Try}
  *                        request empty at once and, in a task of its own, builds, sizes and puts
  *                        each successor through the node's transaction check, logging the verdict.
  *                        For an operator with no block yet, who has no other way to see upkeep do
- *                        anything real.
+ *                        anything real. Observe keeps no memory: a box candidate mode would set
+ *                        aside is rebuilt and logged at every height. The source and at least one
+ *                        job must be enabled for it to run.
  * @param verifyWithNode  in candidate mode, put each admitted successor through the node's
- *                        transaction check before offering it, and refuse any the node refuses. A
- *                        package the node rejects loses every inserted transaction with it, so one
- *                        bad successor would otherwise cost the block the work of every source.
+ *                        transaction check before offering it, and leave out of that height any
+ *                        the node refuses; this is not remembered, and the next height tries the
+ *                        box again. A package the node rejects loses every inserted transaction
+ *                        with it, so one bad successor would otherwise cost the block the work of
+ *                        every source.
  */
 case class UpkeepConfig(scanIntervalMs: Int, maxBoxesPerJob: Int, retryAfterScans: Int,
                         jobs: Map[String, UpkeepConfig.Job],
@@ -54,7 +59,6 @@ object UpkeepConfig {
 
   /** Box ids one job may list in config: each is one read on every scan, so the list is bounded. */
   final val MaxConfiguredBoxes = 256
-
 
   final val Path = "stratum.candidate.sources.upkeep"
 
@@ -88,7 +92,11 @@ object UpkeepConfig {
       block = block)
   }
 
-  /** Mirrors the `stratum.candidate.sources.upkeep` block in `application.conf`; keep them in step. */
+  /**
+   * Mirrors the keys of the `stratum.candidate.sources.upkeep` block in `application.conf`; keep them
+   * in step. `jobs` is empty here while the shipped block lists the heartbeat, off: a job block is
+   * the job's own, read only when present.
+   */
   val Default: UpkeepConfig = UpkeepConfig(
     scanIntervalMs = 60000,
     maxBoxesPerJob = 256,

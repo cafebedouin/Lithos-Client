@@ -81,9 +81,7 @@ Ids are 64 hex characters. A Lithos block is one whose first transaction spends 
 
 ## Worked runs
 
-The end-to-end rig used to test this (a devnet topology, an indexed mining node, an `/info`
-rewriting proxy for appkit, a CPU miner, the checks) is not part of this repository. From a wiped
-chain it reaches a block the client built in one command. Two things any private-chain run needs:
+Two things any private-chain run needs, learned from running this end to end on a devnet:
 
 - **Mine the first blocks with the node's own miner.** A fresh chain's early work is Autolykos v1,
   which only the node's internal miner solves; it mines with the wallet's first secret and ignores
