@@ -2,7 +2,10 @@ package transactions.upkeep
 
 import com.typesafe.config.ConfigFactory
 import configs.{CandidateConfig, CandidateSourceConfig, ConfigValidationException, Configs, UpkeepConfig}
-import org.ergoplatform.appkit.BlockchainParameters
+import org.ergoplatform.appkit.{BlockchainParameters, Parameters}
+import org.ergoplatform.sdk.ErgoId
+import org.ergoplatform.wallet.boxes.ErgoBoxAssetExtractor
+import org.ergoplatform.wallet.interpreter.ErgoInterpreter
 import org.mockito.Mockito.when
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -10,6 +13,7 @@ import org.scalatestplus.mockito.MockitoSugar
 import play.api.{ConfigLoader, Configuration}
 import transactions.candidate.BlockTxMessages.CandidateTx
 import transactions.candidate.CandidateBudget
+import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
 
 import scala.util.{Failure, Success, Try}
 
@@ -44,7 +48,7 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     p
   }
 
-  "The node's accounting" should "charge the transaction, each input, data input and output, and every token twice" in {
+  "The node's accounting" should "charge the transaction, each input, data input and output, and each token entry with its id" in {
     Upkeep.accountedCost(inputs = 1, dataInputs = 0, outputs = 2, assets = 0, params) shouldBe
       10000L + 2000L + 200L
     Upkeep.accountedCost(inputs = 2, dataInputs = 1, outputs = 3, assets = 4, params) shouldBe
@@ -77,45 +81,80 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     admitted.usedCost(CandidateBudget(1000L, 5000L)) shouldBe 2000L
   }
 
-  // ─── fitting ──────────────────────────────────────────────────────────────
+  /** A box carrying `tokens` distinct tokens, as a successor's input. */
+  private def boxWith(tokens: Int): InputUTXO = {
+    val (nodeContext, _, _) = support.FakeNodeContext(mock[node.NodeApi], numAddresses = 1)
+    nodeContext.getClient.execute { ctx =>
+      UTXO(Contract.SIGMA_TRUE, Parameters.OneErg,
+        (1 to tokens).map(i => Token(ErgoId.create(f"$i%064x"), i.toLong)))
+        .setCreationHeight(100).toInput(ctx, ErgoId.create("00" * 32), 0.toShort)
+    }
+  }
 
-  "Fitting" should "take everything the share affords, in order" in {
+  /**
+   * The box's tokens go in and come out again, and the node charges each entry and each distinct
+   * id on both sides: four charges per token, which is what the node's own arithmetic gives and
+   * what the floor charges once, no more.
+   */
+  "A floor" should "charge a box's tokens what the node charges for carrying them through, counted once" in {
+    val plain = boxWith(tokens = 0)
+    val carrying = boxWith(tokens = 3)
+    val tokenTerm = Upkeep.floor(carrying, params)._2 - Upkeep.floor(plain, params)._2
+
+    tokenTerm shouldBe ErgoBoxAssetExtractor.totalAssetsAccessCost(3, 3, 3, 3, 100).toLong
+    tokenTerm shouldBe 4L * 3 * 100
+    Upkeep.floor(plain, params)._2 shouldBe Upkeep.InitCost + 2000L + 100L
+    Upkeep.InitCost shouldBe ErgoInterpreter.interpreterInitCost.toLong
+  }
+
+  it should "weigh the box's own serialized bytes" in {
+    val box = boxWith(tokens = 2)
+    Upkeep.floor(box, params)._1 shouldBe box.bytes.length.toLong
+  }
+
+  // ─── the share, offered successors in turn ────────────────────────────────
+
+  /** Offered in turn, as the build offers them: one that does not fit is passed over, not the end. */
+  private def admitAll(candidates: Seq[Upkeep.Prepared], maxTxs: Int, budget: CandidateBudget): Seq[Upkeep.Prepared] =
+    candidates.foldLeft(Upkeep.Share.of(maxTxs, budget))((share, c) => share.admit(c).getOrElse(share)).chosen
+
+  "A share offered successors in turn" should "take everything it affords, in order" in {
     val all = (1 to 4).map(prepared(_))
-    Upkeep.fitting(all, maxTxs = 10, unbounded) shouldBe all
+    admitAll(all, maxTxs = 10, unbounded) shouldBe all
   }
 
   it should "stop at maxTxs" in {
     val all = (1 to 10).map(prepared(_))
-    Upkeep.fitting(all, maxTxs = 3, unbounded) shouldBe all.take(3)
+    admitAll(all, maxTxs = 3, unbounded) shouldBe all.take(3)
   }
 
   it should "stop at maxBytes" in {
     val all = (1 to 10).map(prepared(_, bytes = 100))
-    Upkeep.fitting(all, maxTxs = 10, CandidateBudget(250L, Long.MaxValue)) shouldBe all.take(2)
+    admitAll(all, maxTxs = 10, CandidateBudget(250L, Long.MaxValue)) shouldBe all.take(2)
   }
 
   it should "stop at maxCost" in {
     val all = (1 to 10).map(prepared(_, cost = 1000L))
-    Upkeep.fitting(all, maxTxs = 10, CandidateBudget(Long.MaxValue, 2500L)) shouldBe all.take(2)
+    admitAll(all, maxTxs = 10, CandidateBudget(Long.MaxValue, 2500L)) shouldBe all.take(2)
   }
 
   /** Successors are independent transactions, so a large one says nothing about a small one behind it. */
   it should "pass over one that does not fit and take a smaller one behind it" in {
     val big = prepared(1, bytes = 1000)
     val small = prepared(2, bytes = 100)
-    Upkeep.fitting(Seq(big, small), maxTxs = 10, CandidateBudget(500L, Long.MaxValue)) shouldBe Seq(small)
+    admitAll(Seq(big, small), maxTxs = 10, CandidateBudget(500L, Long.MaxValue)) shouldBe Seq(small)
   }
 
   it should "leave out a second successor spending a box the first already spends" in {
     val first = prepared(1, inputs = Set(id("shared"), id("one")))
     val second = prepared(2, inputs = Set(id("shared"), id("two")))
     val third = prepared(3)
-    Upkeep.fitting(Seq(first, second, third), maxTxs = 10, unbounded) shouldBe Seq(first, third)
+    admitAll(Seq(first, second, third), maxTxs = 10, unbounded) shouldBe Seq(first, third)
   }
 
   it should "take nothing when the share affords no transaction" in {
-    Upkeep.fitting((1 to 3).map(prepared(_)), maxTxs = 0, unbounded) shouldBe empty
-    Upkeep.fitting((1 to 3).map(prepared(_)), maxTxs = 3, CandidateBudget(10L, 10L)) shouldBe empty
+    admitAll((1 to 3).map(prepared(_)), maxTxs = 0, unbounded) shouldBe empty
+    admitAll((1 to 3).map(prepared(_)), maxTxs = 3, CandidateBudget(10L, 10L)) shouldBe empty
   }
 
   "A successor's kind" should "name its job, so a refused block says which one built it" in {

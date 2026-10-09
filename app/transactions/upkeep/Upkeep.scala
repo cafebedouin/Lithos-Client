@@ -2,6 +2,7 @@ package transactions.upkeep
 
 import org.ergoplatform.appkit.impl.SignedTransactionImpl
 import org.ergoplatform.appkit.{BlockchainParameters, SignedTransaction}
+import org.ergoplatform.wallet.interpreter.ErgoInterpreter
 import transactions.candidate.BlockTxMessages.CandidateTx
 import transactions.candidate.{CandidateBudget, CandidateBundle, CapitalEntry}
 import transactions.engine.execution.RollupExecution
@@ -10,7 +11,7 @@ import work.lithos.mutations.InputUTXO
 /**
  * The pure half of the upkeep source: what a successor costs the block before and after it is
  * built, what a signed successor becomes on the candidate path, the one rule the framework can
- * check on a job's output, and how many successors a share affords.
+ * check on a job's output, and what is left of the source's share as successors are admitted.
  *
  * Kept apart from the actor so a spec can drive each piece with values alone, the way the rent
  * source's sizing is driven: none of this needs a node, a timer or a mailbox.
@@ -25,10 +26,11 @@ object Upkeep {
   // ─── sizing ───────────────────────────────────────────────────────────────
 
   /**
-   * What the node charges a transaction before any script runs, as the rent code accounts for it.
-   * Signing starts from the same figure and adds each input's reduction to it.
+   * What the node charges a transaction before any script runs, read from the interpreter the node
+   * validates with rather than restated, so a change to it there is a change here. Signing starts
+   * from the same figure and adds each input's reduction to it.
    */
-  final val InitCost = 10000L
+  final val InitCost: Long = ErgoInterpreter.interpreterInitCost.toLong
 
   /**
    * The fewest bytes an input can take: a 32-byte box id, an empty proof's length byte, and an
@@ -40,10 +42,15 @@ object Upkeep {
 
   /**
    * The node's own accounting for a transaction of this shape, before any script runs: the
-   * per-transaction, per-input, per-data-input and per-output cost, and the tokens read on the way
-   * in and out, each counted twice because the node charges every entry and every distinct id and
-   * the distinct ids are not known here. Exact for a token-free transaction and slightly over for
-   * one carrying tokens, which only costs package space.
+   * per-transaction, per-input, per-data-input and per-output cost, and the token term.
+   *
+   * `assets` is the token entries the transaction carries, the inputs' and the outputs' together,
+   * each counted once. The factor of two on it is the node's, not a second count: the node charges
+   * `tokenAccessCost` once for every entry and once more for every distinct token id, on each side
+   * (`ErgoBoxAssetExtractor.totalAssetsAccessCost`). The distinct ids are not known here, and there
+   * are never more of them than entries, so they are charged as one per entry. Exact for a
+   * token-free transaction and for one whose every entry is a different token, and over otherwise,
+   * which only costs package space.
    */
   def accountedCost(inputs: Int, dataInputs: Int, outputs: Int, assets: Int,
                     params: BlockchainParameters): Long =
@@ -53,7 +60,9 @@ object Upkeep {
   /**
    * What a successor of `box` adds to the block at the least, sized before it is built: in bytes,
    * the box recreated and the input that spends it with no proof; in cost, the node's accounting
-   * for that shape with the tokens carried through once.
+   * for that shape, one input and one output, with the box's tokens carried through once: its
+   * entries going in and the same entries coming out, which is the `2 * tokens` handed on as the
+   * transaction's token entries.
    *
    * The bytes are the box's own serialized length. That carries a [[KeylessInputBytes]]-long
    * reference to the transaction that made the box, which the recreation drops and the proof-less
@@ -65,7 +74,7 @@ object Upkeep {
    */
   def floor(box: InputUTXO, params: BlockchainParameters): (Long, Long) =
     (box.bytes.length.toLong,
-      accountedCost(inputs = 1, dataInputs = 0, outputs = 1, assets = 2 * box.tokens.size, params))
+      accountedCost(inputs = 1, dataInputs = 0, outputs = 1, assets = box.tokens.size + box.tokens.size, params))
 
   // ─── the candidate path ───────────────────────────────────────────────────
 
@@ -150,7 +159,4 @@ object Upkeep {
     def of(maxTxs: Int, budget: CandidateBudget): Share = Share(maxTxs, budget.maxBytes, budget.maxCost)
   }
 
-  /** As many successors as the source's share affords, in the order they were prepared. */
-  def fitting(prepared: Seq[Prepared], maxTxs: Int, budget: CandidateBudget): Seq[Prepared] =
-    prepared.foldLeft(Share.of(maxTxs, budget))((share, candidate) => share.admit(candidate).getOrElse(share)).chosen
 }

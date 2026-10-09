@@ -88,7 +88,7 @@ class UpkeepSource(nodeContext: NodeContext,
     } else {
       logger.info(s"UpkeepSource started: mode=${upkeepConfig.mode}, jobs=${jobs.map(_.name).mkString(", ")}, " +
         s"scanIntervalMs=${upkeepConfig.scanIntervalMs}, maxBoxesPerJob=${upkeepConfig.maxBoxesPerJob}, " +
-        s"retryAfterScans=${upkeepConfig.retryAfterScans}, share: txs=${limits.maxTxs}, " +
+        s"retryAfterScans=${memory.retryAfterScans}, share: txs=${limits.maxTxs}, " +
         s"bytes=${limits.maxBytes}, cost=${limits.maxCost}; refusedHeld=${memory.refusedIds.size}")
       ticker = Some(context.system.scheduler.scheduleWithFixedDelay(
         upkeepConfig.scanIntervalMs.milliseconds, upkeepConfig.scanIntervalMs.milliseconds,
@@ -116,7 +116,7 @@ class UpkeepSource(nodeContext: NodeContext,
       val known = tracked.values.flatten.toSet
       val retried = memory.passed(known)
       if (retried.nonEmpty)
-        logger.info(s"Upkeep offers ${retried.size} refused boxes again after ${upkeepConfig.retryAfterScans} " +
+        logger.info(s"Upkeep offers ${retried.size} refused boxes again after ${memory.retryAfterScans} " +
           s"passes: ${retried.toSeq.sorted.map(_.take(8)).mkString(", ")}")
       if (known.nonEmpty)
         logger.info(s"Upkeep scan holds ${known.size} boxes: " +
@@ -358,9 +358,10 @@ object UpkeepSource {
    * it has changed or gone.
    *
    * @param retryAfterScans passes a refused box sits out, counted from the first that lands after
-   *                        the refusal
+   *                        the refusal. Read from config where the memory is wired and held only
+   *                        here, so the source's logs and its retry rule cannot disagree.
    */
-  final class Memory(retryAfterScans: Int) {
+  final class Memory(val retryAfterScans: Int) {
     require(retryAfterScans > 0, s"retryAfterScans must be positive, not $retryAfterScans")
 
     private val refused = new AtomicReference[Map[String, Int]](Map.empty[String, Int])
