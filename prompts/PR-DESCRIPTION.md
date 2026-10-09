@@ -25,7 +25,9 @@ transaction; the successor keeps the script, tokens and terms, is stamped with t
 most the tip leaves). Its tree is pinned in `HeartbeatJob.TreeHex`, and a spec holds the compiled script to
 it on mainnet and testnet. It pays what the box can spare, up to the tip, to the miner's collection output
 as capital the holding top-up aggregates, and beats for free when that is too small for a box of its own.
-No due-job box exists on mainnet yet. Lithos itself has mined about 30 mainnet blocks so far (heights 1,888,828 to
+A beat is valid in exactly one block, the one whose height it is stamped with, so "anyone" means anyone building
+for the next height; a non-miner can broadcast one and have it land in that block. `jobs.heartbeat.minTip` lets an
+operator decline boxes offering less than a chosen tip, free beats included. No due-job box exists on mainnet yet. Lithos itself has mined about 30 mainnet blocks so far (heights 1,888,828 to
 1,890,575, about 1.7% of blocks over that span), so upkeep carried only in Lithos blocks waits about 60 blocks today.
 
 ### Running on a private chain
@@ -63,10 +65,14 @@ job is enabled. A job name that is enabled and unknown is refused at startup by 
 
 ## Not extractive
 
-Nothing reads pending transactions, so nothing reorders or front-runs anyone. A job's transaction may only
-spend boxes it discovered; the source refuses one that spends anything else. The shipped job finds boxes by
-script and signs with no key and no fee. The read-back is the node's mempool-adjusted view, so a box a
-pending transaction already spends is skipped for that block.
+Upkeep never looks at pending transactions to decide what to build. Its read-back uses the node's
+mempool-adjusted view, so a box a pending transaction already spends is dropped until the next scan; a spend
+that reaches the mempool after the read-back loses to this miner's own block, as with any block producer.
+
+A job's transaction may only spend boxes that job reported from discovery; the source refuses one that
+spends anything else, which holds a job to its own word. The shipped job reports only boxes at its own
+script and signs with no key and no fee, so it cannot spend the operator's wallet; a job that implements
+`UpkeepJob` directly is held to that by review.
 
 ## Limits
 
@@ -74,9 +80,15 @@ pending transaction already spends is skipped for that block.
   built the bad one. That is a client-wide gap. This PR narrows it for upkeep with `verifyWithNode` (on by
   default), which puts every successor through the node's `/transactions/check` before it is offered, but it
   does not close it.
-- Discovery keeps the soonest-due boxes up to `maxBoxesPerJob`, so a flood of cheap due boxes at a public
-  script can still crowd a job's real ones out of the cap. Configured `boxIds` are never cut.
-- A refresh rebuilds the source's work for the height, as the rent source does.
+- By-script discovery reads at most the 1,000 oldest boxes at a job's script per pass and keeps the soonest
+  due of those, up to `maxBoxesPerJob`. Anyone can create boxes at a public script, so 1,000 older boxes
+  there, due or not, hide every newer one from an indexed client, and a beat gives a real box a newer index.
+  Configured `boxIds` are never cut (at most 256 per job, each a read on every scan), but on a plain node
+  they go stale after each beat, since the successor has a new id and a plain node cannot follow a spend.
+- A refresh rebuilds the source's work for the height, as the rent source does. A build signs at most 16
+  successors it then cannot fit, and stops after 16 refusals.
+- With `useTruePropCollection`, the tip output is anyone-can-spend until the holding top-up in the same
+  package takes it, as the rent source's capital is.
 
 ## Follow-ups, not in this PR
 
@@ -121,12 +133,12 @@ pending transaction already spends is skipped for that block.
   refused, a stale creation height refused, a zero period refused, a tip above the value taking all but a
   box's minimum, and R4 + R5 computed in Long.
 - End to end. A due-job box is live on testnet (`e5d9d2c2…`, period 720, tip 0.01 ERG). On a private chain
-  with 20-second blocks, one command of the operator's network rig goes from a wiped chain to a block the
+  with 20-second blocks, one command of a test rig goes from a wiped chain to a block the
   client built: the deployer deploys the protocol, the client joins the collateral queue with its own ERG and
-  LIT, and block 76 carries the client's genesis transaction and the upkeep beat together, the beat accepted
-  by the node's check and the block by consensus. The rig (topology, node settings, an `/info` rewriting proxy
-  for appkit, a CPU miner) lives in that repository, not here; `DEVNET.md` says what any private-chain run
-  needs.
+  LIT, and a block carries the client's genesis transaction and the upkeep beat together, the beat accepted
+  by the node's check (which runs the node's stateful validation at its next height, not the mempool's fee
+  floor) and the block by consensus. The rig (topology, node settings, an `/info` rewriting proxy for appkit,
+  a CPU miner) is a test rig outside this repository; `DEVNET.md` says what any private-chain run needs.
 - `sbt test` on Java 17: 2,774 tests, all passing (run with the stacked follow-on included). One spec outside this
   change, `state.persistence.SnapshotFallbackSpec`, is load-sensitive: its first LevelDB open can exceed TestKit's
   3-second expectation when the host is busy, and eight of its cases then fail together without this change. A
