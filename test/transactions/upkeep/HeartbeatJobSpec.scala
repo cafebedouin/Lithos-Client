@@ -15,15 +15,16 @@ import transactions.upkeep.jobs.HeartbeatJob
 import transactions.upkeep.jobs.HeartbeatJob.Beat
 import work.lithos.mutations.{Contract, InputUTXO}
 
-import java.util.concurrent.atomic.AtomicInteger
 import scala.collection.JavaConverters._
-import scala.util.{Failure, Success}
+import scala.util.Success
 
 /**
- * The heartbeat job against a mocked node: what discovery returns on each kind of node, what
- * `due` says at the boundary, and what a build produces. The contract's own rules are
- * [[contracts.specs.upkeep.DueJobSpec]]'s to prove; here the successor is checked against them
- * field by field, and signing it offline is what shows the keyless prover does its job.
+ * The heartbeat's own rule against a mocked node: which boxes at its script it maintains, what
+ * `due` says at the boundary, and what its plan produces once signed. Discovery, paging, the
+ * configured list and assembly are every script job's and [[ScriptJobSpec]]'s to prove; the
+ * contract's own rules are [[contracts.specs.upkeep.DueJobSpec]]'s. Here the successor is checked
+ * against those rules field by field, and signing it offline shows the plan is one the keyless
+ * prover can sign.
  */
 class HeartbeatJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
 
@@ -35,40 +36,25 @@ class HeartbeatJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
   private def id(seed: String): String =
     (seed.getBytes("UTF-8").map(b => f"$b%02x").mkString * 64).take(64)
 
-  /**
-   * @param indexed whether the node reports the extra index
-   * @param boxIds  the configured fallback list
-   */
-  private class Fixture(indexed: Boolean = true, boxIds: Seq[String] = Seq.empty) {
+  /** An indexed node, so discovery asks the index for every box at the script. */
+  private class Fixture {
     val api: NodeApi = mock[NodeApi]
     val (nodeContext, _, wallet) = FakeNodeContext(api, numAddresses = 1)
     val client = nodeContext.getClient
-    val job = new HeartbeatJob(boxIds)
+    val job = new HeartbeatJob(Seq.empty)
     val tree: String = client.execute(ctx => HeartbeatJob.contract(ctx.getNetworkType).ergoTreeHex)
 
-    /** What the index holds, and what a read by id answers from. */
+    /** What the index holds. */
     @volatile var atTree: Seq[NodeBox] = Seq.empty
-    @volatile var live: Seq[NodeBox] = Seq.empty
-    @volatile var indexDown: Boolean = false
-    val pages = new AtomicInteger(0)
 
-    when(api.indexerEnabled).thenReturn(indexed)
+    when(api.indexerEnabled).thenReturn(true)
     when(api.unspentBoxesByErgoTree(any[String], any[Paging], any[SortDirection], any[MempoolOptions]))
       .thenAnswer { inv =>
-        pages.incrementAndGet()
-        if (indexDown) Failure(new RuntimeException("the index is down"))
-        else {
-          val asked = inv.getArgument[String](0)
-          val paging = inv.getArgument[Paging](1)
-          val all = atTree.filter(_.ergoTree == asked)
-          Success(all.slice(paging.offset, paging.offset + paging.limit)
-            .map(box => IndexedBox(box, "", box.creationHeight, 1L)))
-        }
+        val asked = inv.getArgument[String](0)
+        val paging = inv.getArgument[Paging](1)
+        Success(atTree.filter(_.ergoTree == asked).slice(paging.offset, paging.offset + paging.limit)
+          .map(box => IndexedBox(box, "", box.creationHeight, 1L)))
       }
-    when(api.boxesWithPoolByIds(any[Seq[String]])).thenAnswer { inv =>
-      val asked = inv.getArgument[Seq[String]](0)
-      Success(live.filter(box => asked.contains(box.boxId)))
-    }
 
     def discover(): Seq[String] = client.execute(ctx => job.discover(ctx, api, ctx.getHeight))
 
@@ -82,15 +68,11 @@ class HeartbeatJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       CanonicalNodeBox(id(seed), id(seed), value, 0, lastBeat, tree, assets,
         NodeRegisters(regs.zipWithIndex.map { case (v, i) => s"R${i + 4}" -> v.toHex }.toMap))
     }
-
-    /** A box at this wallet's key: what a mistaken entry in the configured list looks like. */
-    def strayBox(seed: String): NodeBox =
-      CanonicalNodeBox(id(seed), id(seed), Parameters.OneErg, 0, 1000, wallet.contract.ergoTreeHex)
   }
 
   // ─── discovery ────────────────────────────────────────────────────────────
 
-  "Discovery on an indexed node" should "list every well-formed box at the contract and skip the rest" in {
+  "Discovery" should "keep every box at the contract whose registers are a beat, and skip the rest" in {
     val f = new Fixture()
     val a = f.dueBox("a")
     val b = f.dueBox("b", lastBeat = 2000, period = 1, tip = 0L)
@@ -107,64 +89,6 @@ class HeartbeatJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
 
     f.discover() shouldBe Seq(a.boxId, b.boxId)
     verify(f.api, never()).boxesWithPoolByIds(any[Seq[String]])
-  }
-
-  it should "page the index until a short page" in {
-    val f = new Fixture()
-    val boxes = (0 until 150).map(i => f.dueBox(s"p$i"))
-    f.atTree = boxes
-
-    f.discover() shouldBe boxes.map(_.boxId)
-    f.pages.get shouldBe 2
-  }
-
-  it should "throw when the index cannot be read, so the source keeps its last pass" in {
-    val f = new Fixture()
-    f.atTree = Seq(f.dueBox("a"))
-    f.indexDown = true
-
-    an[IllegalStateException] should be thrownBy f.discover()
-  }
-
-  /** The configured ids have to be known before the job exists, so a throwaway fixture mints the boxes. */
-  it should "also read the configured list, without listing a box twice" in {
-    val probe = new Fixture()
-    val a = probe.dueBox("a")
-    val b = probe.dueBox("b")
-    val f = new Fixture(boxIds = Seq(a.boxId, b.boxId))
-    f.atTree = Seq(a)
-    f.live = Seq(a, b)
-
-    f.discover() shouldBe Seq(a.boxId, b.boxId)
-  }
-
-  "Discovery on a plain node" should "fall back to the configured list and never ask the index" in {
-    val probe = new Fixture()
-    val a = probe.dueBox("a")
-    val spent = probe.dueBox("b")
-    val stray = probe.strayBox("c")
-    val f = new Fixture(indexed = false, boxIds = Seq(a.boxId, spent.boxId, stray.boxId))
-    f.atTree = Seq(a, spent)
-    f.live = Seq(a, stray)
-
-    f.discover() shouldBe Seq(a.boxId)
-    verify(f.api, never()).unspentBoxesByErgoTree(any[String], any[Paging], any[SortDirection], any[MempoolOptions])
-  }
-
-  it should "find nothing, and read nothing, with no list configured" in {
-    val f = new Fixture(indexed = false)
-    f.atTree = Seq(f.dueBox("a"))
-
-    f.discover() shouldBe empty
-    verify(f.api, never()).boxesWithPoolByIds(any[Seq[String]])
-    verify(f.api, never()).unspentBoxesByErgoTree(any[String], any[Paging], any[SortDirection], any[MempoolOptions])
-  }
-
-  it should "throw when the configured boxes cannot be read" in {
-    val f = new Fixture(indexed = false, boxIds = Seq(id("a")))
-    when(f.api.boxesWithPoolByIds(any[Seq[String]])).thenReturn(Failure(new RuntimeException("node down")))
-
-    an[IllegalStateException] should be thrownBy f.discover()
   }
 
   // ─── due ──────────────────────────────────────────────────────────────────
@@ -211,7 +135,7 @@ class HeartbeatJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       val input = box.toInputUTXO(ctx)
       f.job.due(input, height) shouldBe true
 
-      val built = f.job.build(ctx, input, height, f.wallet.contract).getOrElse(fail("the job built nothing"))
+      val built = f.job.build(input, BuildContext(ctx, height, f.wallet.contract)).getOrElse(fail("the job built nothing"))
       val outputs = built.tx.getOutputsToSpend.asScala
       outputs should have size 2
 
@@ -242,7 +166,7 @@ class HeartbeatJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     f.client.execute { ctx =>
       val height = ctx.getHeight + 1
       val input = f.dueBox("a", lastBeat = height - period).toInputUTXO(ctx)
-      val built = f.job.build(ctx, input, height, Contract.SIGMA_TRUE).getOrElse(fail("the job built nothing"))
+      val built = f.job.build(input, BuildContext(ctx, height, Contract.SIGMA_TRUE)).getOrElse(fail("the job built nothing"))
       Contract(built.tx.getOutputsToSpend.get(1).getErgoTree) shouldBe Contract.SIGMA_TRUE
       built.capital.map(_.value) shouldBe Seq(tip)
     }
@@ -254,7 +178,7 @@ class HeartbeatJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       val height = ctx.getHeight + 1
       Seq(1L, 0L).foreach { small =>
         val box = f.dueBox(s"s$small", lastBeat = height - period, tip = small)
-        val built = f.job.build(ctx, box.toInputUTXO(ctx), height, f.wallet.contract)
+        val built = f.job.build(box.toInputUTXO(ctx), BuildContext(ctx, height, f.wallet.contract))
           .getOrElse(fail("the job built nothing"))
         built.tx.getOutputsToSpend.size shouldBe 1
         val successor = successorOf(built)
@@ -272,7 +196,7 @@ class HeartbeatJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       // The successor would keep 1000 nanoERG, under the consensus minimum for any box.
       val box = f.dueBox("a", lastBeat = height - period, value = tip + 1000L)
       f.job.due(box.toInputUTXO(ctx), height) shouldBe true
-      f.job.build(ctx, box.toInputUTXO(ctx), height, f.wallet.contract) shouldBe None
+      f.job.build(box.toInputUTXO(ctx), BuildContext(ctx, height, f.wallet.contract)) shouldBe None
     }
   }
 
@@ -280,7 +204,7 @@ class HeartbeatJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     val f = new Fixture()
     f.client.execute { ctx =>
       val malformed = f.dueBox("a", registers = Seq(ErgoValue.of(1000L), ErgoValue.of(period), ErgoValue.of(tip)))
-      f.job.build(ctx, malformed.toInputUTXO(ctx), ctx.getHeight + 1, f.wallet.contract) shouldBe None
+      f.job.build(malformed.toInputUTXO(ctx), BuildContext(ctx, ctx.getHeight + 1, f.wallet.contract)) shouldBe None
     }
   }
 }

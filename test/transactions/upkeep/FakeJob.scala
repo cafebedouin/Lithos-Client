@@ -42,9 +42,9 @@ final class FakeJob(wallet: NodeWallet, val name: String = "fake") extends Upkee
     isDue
   }
 
-  override def build(ctx: BlockchainContext, box: InputUTXO, height: Int,
-                     payTo: Contract): Option[UpkeepJob.Built] = {
+  override def build(box: InputUTXO, bc: BuildContext): Option[UpkeepJob.Built] = {
     builds.incrementAndGet()
+    val (ctx, height, payTo) = (bc.ctx, bc.height, bc.payTo)
     behaviour match {
       case Advance => Some(advance(ctx, Seq(box), height, payTo))
       case Padded(tipOutputs) => Some(advance(ctx, Seq(box), height, payTo, tipOutputs))

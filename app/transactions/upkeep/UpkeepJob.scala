@@ -1,7 +1,7 @@
 package transactions.upkeep
 
 import node.NodeApi
-import org.ergoplatform.appkit.{BlockchainContext, SignedTransaction}
+import org.ergoplatform.appkit.{BlockchainContext, BlockchainParameters, NetworkType, SignedTransaction}
 import transactions.candidate.CapitalEntry
 import work.lithos.mutations.{Contract, InputUTXO}
 
@@ -11,7 +11,9 @@ import work.lithos.mutations.{Contract, InputUTXO}
  * A job is a reviewed description of one protocol's boxes: which ones it maintains, when one is
  * due, and what its successor is. The source around it owns everything else — the timer, the
  * revalidation, the budget, the refusals — so a new protocol is one implementation of this trait
- * and one config line, with no actor code of its own to get wrong.
+ * and one config line, with no actor code of its own to get wrong. A job whose boxes sit at one
+ * script and whose successor is a fixed function of the box extends [[ScriptJob]], which is that
+ * job's rule and nothing more; this trait is for a job that does not fit that shape.
  *
  * The rules a job has to keep. The framework enforces the first where it can and takes the rest on
  * trust, which is why every job is reviewed before it is registered:
@@ -67,10 +69,10 @@ trait UpkeepJob {
    *
    * Signed by the job rather than the source because only the job knows what satisfies its
    * script: a box guarded by a condition that reduces to true takes an empty proof, which a prover
-   * holding no secret produces. The outputs are created at `height`, the block they will land in,
-   * and any revenue sits at `payTo`.
+   * holding no secret produces. The outputs are created at `bc.height`, the block they will land
+   * in, and any revenue sits at `bc.payTo`.
    */
-  def build(ctx: BlockchainContext, box: InputUTXO, height: Int, payTo: Contract): Option[UpkeepJob.Built]
+  def build(box: InputUTXO, bc: BuildContext): Option[UpkeepJob.Built]
 }
 
 object UpkeepJob {
@@ -81,4 +83,27 @@ object UpkeepJob {
    * reported, so no job can understate what it costs the block.
    */
   final case class Built(tx: SignedTransaction, capital: Seq[CapitalEntry] = Seq.empty)
+}
+
+/**
+ * Everything a build may need beyond the box, gathered once per block build and handed to every job.
+ *
+ * One value rather than an argument list, so a field a later job needs is added here and not to the
+ * signature of every job; and gathered once, because the node's parameters are the same for every
+ * box in a block and reading them per box would be one node read per box for nothing.
+ *
+ * @param ctx     the appkit context the build runs in; a job may read boxes through it, such as a
+ *                data input
+ * @param params  the node's parameters for this block: price per byte, per-input and per-output cost
+ * @param height  the block the successor will land in, which outputs are created at and a due rule
+ *                is written against
+ * @param payTo   the collection contract revenue is paid to
+ * @param network the network this client runs on, which picks a job's compiled contract
+ */
+final case class BuildContext(ctx: BlockchainContext, params: BlockchainParameters, height: Int,
+                              payTo: Contract, network: NetworkType)
+
+object BuildContext {
+  def apply(ctx: BlockchainContext, height: Int, payTo: Contract): BuildContext =
+    BuildContext(ctx, ctx.getDataSource.getParameters, height, payTo, ctx.getNetworkType)
 }

@@ -5,11 +5,10 @@ import configs.{CandidateSourceConfig, NodeContext, UpkeepConfig}
 import node.MutationConversions._
 import node.NodeApi
 import node.model.NodeBox
-import org.ergoplatform.appkit.{BlockchainContext, BlockchainParameters}
 import org.slf4j.{Logger, LoggerFactory}
 import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
 import transactions.candidate.{CandidateBundle, CandidateCapital}
-import work.lithos.mutations.{Contract, InputUTXO}
+import work.lithos.mutations.InputUTXO
 
 import java.util.concurrent.atomic.AtomicReference
 import scala.concurrent.{ExecutionContext, Future}
@@ -180,7 +179,6 @@ class UpkeepSource(nodeContext: NodeContext,
    */
   private def advance(work: Seq[JobWork], blockHeight: Int): Seq[CandidateBundle] =
     Try(nodeContext.getClient.execute { ctx =>
-      val params = ctx.getDataSource.getParameters
       val ids = work.flatMap(_.offered).distinct
       val live = nodeApi.boxesWithPoolByIds(ids) match {
         case Success(boxes) => boxes
@@ -191,7 +189,9 @@ class UpkeepSource(nodeContext: NodeContext,
       val gone = ids.toSet -- byId.keySet
       if (gone.nonEmpty) self ! Spent(gone)
 
-      val payTo = CandidateCapital.collectionContract(nodeContext.getNodeWallet, useTrueProp)
+      // Read once for the block: every job builds against the same parameters, height and payTo.
+      val bc = BuildContext(ctx, blockHeight,
+        CandidateCapital.collectionContract(nodeContext.getNodeWallet, useTrueProp))
       var share = Upkeep.Share.of(limits.maxTxs, limits.budget)
       var refused = Set.empty[String]
       var due = 0
@@ -199,7 +199,7 @@ class UpkeepSource(nodeContext: NodeContext,
       val queue = work.iterator.flatMap(item => item.offered.toSeq.sorted.flatMap(byId.get).map(item -> _))
       while (!share.full && queue.hasNext) {
         val (item, box) = queue.next()
-        attempt(ctx, params, item, box, blockHeight, payTo, share) match {
+        attempt(bc, item, box, share) match {
           case Attempt.Ready(successor, admitted) =>
             due += 1
             share = admitted
@@ -244,22 +244,21 @@ class UpkeepSource(nodeContext: NodeContext,
    * problem. One whose serialized form does not hash to the id the node gave it is refused before
    * the job sees it, since a transaction built from it would spend a box that does not exist.
    */
-  private def attempt(ctx: BlockchainContext, params: BlockchainParameters, item: JobWork, box: NodeBox,
-                      blockHeight: Int, payTo: Contract, share: Upkeep.Share): Attempt = {
+  private def attempt(bc: BuildContext, item: JobWork, box: NodeBox, share: Upkeep.Share): Attempt = {
     val job = item.job
-    Try(box.toInputUTXO(ctx)) match {
+    Try(box.toInputUTXO(bc.ctx)) match {
       case Failure(ex) => Attempt.Refused(s"the box cannot be read: ${ex.getMessage}")
       case Success(input) if input.id.toString != box.boxId =>
         Attempt.Refused(s"the box serializes to ${input.id.toString}, not the id the node reports")
-      case Success(input) => Try(job.due(input, blockHeight)) match {
+      case Success(input) => Try(job.due(input, bc.height)) match {
         case Failure(ex) => Attempt.Refused(s"due() failed: ${ex.getMessage}")
         case Success(false) => Attempt.NotDue
         case Success(true) =>
-          val (floorBytes, floorCost) = Upkeep.floor(input, params)
+          val (floorBytes, floorCost) = Upkeep.floor(input, bc.params)
           if (!share.affords(floorBytes, floorCost))
             Attempt.Deferred(s"at least ${floorBytes}B and $floorCost cost, over the " +
               s"${share.bytes}B and ${share.cost} cost left of the share")
-          else build(ctx, params, item, input, blockHeight, payTo) match {
+          else build(bc, item, input) match {
             case Left(reason) => Attempt.Refused(reason)
             case Right(successor) => share.admit(successor) match {
               case Some(admitted) => Attempt.Ready(successor, admitted)
@@ -274,17 +273,16 @@ class UpkeepSource(nodeContext: NodeContext,
   }
 
   /** The job's successor for one due box, sized, or why this source will not carry it. */
-  private def build(ctx: BlockchainContext, params: BlockchainParameters, item: JobWork, input: InputUTXO,
-                    blockHeight: Int, payTo: Contract): Either[String, Upkeep.Prepared] =
+  private def build(bc: BuildContext, item: JobWork, input: InputUTXO): Either[String, Upkeep.Prepared] =
     Try {
-      item.job.build(ctx, input, blockHeight, payTo) match {
+      item.job.build(input, bc) match {
         case None => Left("the job could not build a successor")
         case Some(built) =>
           val foreign = Upkeep.undiscoveredInputs(built.tx, item.discovered)
           if (foreign.nonEmpty)
             Left(s"its successor spends ${foreign.size} box(es) the job never discovered: ${foreign.mkString(", ")}")
           else Right(Upkeep.Prepared(item.job.name, input.id.toString,
-            Upkeep.member(built.tx, item.job.name, input, params), built.capital))
+            Upkeep.member(built.tx, item.job.name, input, bc.params), built.capital))
       }
     } match {
       case Failure(ex) => Left(s"build failed: ${ex.getMessage}")

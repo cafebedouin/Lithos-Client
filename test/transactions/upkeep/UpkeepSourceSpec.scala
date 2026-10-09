@@ -375,10 +375,9 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     val sample = probe.box("a")
     probe.job.behaviour = FakeJob.Padded(20)
     val (heavy, light) = probe.nodeContext.getClient.execute { ctx =>
-      val params = ctx.getDataSource.getParameters
+      val bc = BuildContext(ctx, ctx.getHeight + 1, probe.wallet.contract)
       val input = sample.toInputUTXO(ctx)
-      def cost(job: FakeJob): Long = Upkeep.member(
-        job.build(ctx, input, ctx.getHeight + 1, probe.wallet.contract).get.tx, job.name, input, params).cost
+      def cost(job: FakeJob): Long = Upkeep.member(job.build(input, bc).get.tx, job.name, input, bc.params).cost
       (cost(probe.job), cost(probe.other))
     }
     heavy should be > light
