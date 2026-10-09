@@ -1,0 +1,8 @@
+# blake2b256 of each contract's prop bytes as ProtocolContracts compiles it with NO deployment
+# override installed: `NETWORK name hash`, one per line. Read by ProtocolContractsDeploymentSpec.
+#
+# These are the trees live boxes sit under. A line that changes means a mainnet or testnet address
+# moved; that is only ever right alongside a redeployment.
+#
+# Not yet recorded: the session that wrote the override had no compiler. The first run of
+# ProtocolContractsDeploymentSpec fails and prints every line to paste here.
