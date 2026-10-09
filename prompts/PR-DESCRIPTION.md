@@ -139,7 +139,7 @@ script and signs with no key and no fee, so it cannot spend the operator's walle
   by the node's check (which runs the node's stateful validation at its next height, not the mempool's fee
   floor) and the block by consensus. The rig (topology, node settings, an `/info` rewriting proxy for appkit,
   a CPU miner) is a test rig outside this repository; `DEVNET.md` says what any private-chain run needs.
-- `sbt test` on Java 17: 2,774 tests, all passing (run with the stacked follow-on included). One spec outside this
+- `sbt test` on Java 17: 2,784 tests, all passing (run with the stacked follow-on included). One spec outside this
   change, `state.persistence.SnapshotFallbackSpec`, is load-sensitive: its first LevelDB open can exceed TestKit's
   3-second expectation when the host is busy, and eight of its cases then fail together without this change. A
   separate one-line PR gives it the 20 s the other actor specs allow.
