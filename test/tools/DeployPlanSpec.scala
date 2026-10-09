@@ -221,6 +221,16 @@ class DeployPlanSpec extends AnyFlatSpec with Matchers with MockitoSugar with Be
     problems.exists(_.contains("--bogus")) shouldBe true
   }
 
+  it should "take the chain's coinbase lock as --reward-delay, mainnet's 720 by default" in {
+    val ks = java.nio.file.Files.createTempFile("ks", ".json")
+    val base = Seq("--node", "http://n", "--api-key", "k", "--keystore", ks.toString, "--pass", "p",
+      "--network", "TESTNET", "--out", "/tmp/d.json")
+    DeployProtocol.parseArgs(base).toOption.get.rewardDelay shouldEqual NodeWallet.MINER_REWARD_DELAY
+    DeployProtocol.parseArgs(base ++ Seq("--reward-delay", "10")).toOption.get.rewardDelay shouldEqual 10
+    DeployProtocol.parseArgs(base ++ Seq("--reward-delay", "x")).left.toOption.get
+      .exists(_.contains("--reward-delay")) shouldBe true
+  }
+
   "The deployer's FP control address" should "be what the mainnet constants compile on mainnet" in {
     DeployPlan.fpControlAddress(NetworkType.MAINNET).toString shouldEqual
       DeploymentIds.mainnet.fpControlAddress.toString

@@ -11,7 +11,8 @@ import org.ergoplatform.sdk.ErgoId
 import org.slf4j.{Logger, LoggerFactory}
 import tools.DeployPlan.FundRequest
 import transactions.ProtocolContracts
-import work.lithos.mutations.{InputUTXO, Token, TxBuilder, UTXO}
+import org.ergoplatform.ErgoTreePredef
+import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
@@ -28,7 +29,7 @@ final class DeployFailure(val step: String, cause: Throwable)
  * {{{
  * sbt "runMain tools.DeployProtocol --node http://127.0.0.1:9153 --api-key hello \
  *   --keystore <keystore.json> --pass <pass> --network TESTNET --out deployment.json \
- *   [--fund <address>:<nanoERG>:<LIT>]... [--force] [--timeout-seconds 1800]"
+ *   [--fund <address>:<nanoERG>:<LIT>]... [--force] [--timeout-seconds 1800] [--reward-delay 720]"
  * }}}
  *
  * Signs with the client's own wiring (`SecretStorage` -> `NodeWallet`, `TxBuilder`,
@@ -52,13 +53,14 @@ object DeployProtocol {
                         out: Path,
                         funds: Seq[FundRequest],
                         force: Boolean,
-                        timeoutSeconds: Int)
+                        timeoutSeconds: Int,
+                        rewardDelay: Int)
 
   val Usage: String =
     """usage: tools.DeployProtocol --node <url> --api-key <key> --keystore <keystore.json> --pass <pass>
       |                            --network <MAINNET|TESTNET> --out <deployment.json>
       |                            [--fund <address>:<nanoERG>:<LIT base units>]... [--force]
-      |                            [--timeout-seconds <n>]""".stripMargin
+      |                            [--timeout-seconds <n>] [--reward-delay <blocks>]""".stripMargin
 
   /** Every problem with the command line at once, or the arguments. */
   def parseArgs(args: Seq[String]): Either[Seq[String], Args] = {
@@ -68,7 +70,7 @@ object DeployProtocol {
     var force = false
     var rest = args.toList
     val valued = Set("--node", "--api-key", "--keystore", "--pass", "--network", "--out", "--fund",
-      "--timeout-seconds")
+      "--timeout-seconds", "--reward-delay")
     while (rest.nonEmpty) rest match {
       case "--force" :: tail => force = true; rest = tail
       case "--fund" :: v :: tail => funds :+= v; rest = tail
@@ -96,6 +98,10 @@ object DeployProtocol {
     val timeout = values.get("--timeout-seconds").map(s => Try(s.toInt).toOption.filter(_ > 0).getOrElse {
       problems += s"--timeout-seconds must be a positive integer, got $s"; 0
     }).getOrElse(1800)
+    // a private chain may lock coinbases for fewer blocks than mainnet's 720; the reward script embeds the delay
+    val rewardDelay = values.get("--reward-delay").map(s => Try(s.toInt).toOption.filter(_ > 0).getOrElse {
+      problems += s"--reward-delay must be a positive integer, got $s"; 0
+    }).getOrElse(NodeWallet.MINER_REWARD_DELAY)
     val parsed = funds.map(DeployPlan.parseFund)
     parsed.collect { case Left(p) => p }.foreach(problems += _)
     val requests = parsed.collect { case Right(r) => r }
@@ -107,7 +113,8 @@ object DeployProtocol {
 
     val all = problems.result()
     if (all.nonEmpty) Left(all)
-    else Right(Args(node.get, key.get, keystore.get, pass.get, network.get, out.get, requests, force, timeout))
+    else Right(Args(node.get, key.get, keystore.get, pass.get, network.get, out.get, requests, force, timeout,
+      rewardDelay))
   }
 
   def main(raw: Array[String]): Unit = {
@@ -128,7 +135,7 @@ object DeployProtocol {
         ctx.newProverBuilder().withSecretStorage(storage).withEip3Secret(0).build())))
         .fold(ex => throw new DeployFailure("connect", ex), identity)
       new Deployer(client, RestNodeApi(url, Some(args.apiKey)), wallet, args.network,
-        timeoutMs = args.timeoutSeconds * 1000L).run(args.out, args.funds, args.force)
+        timeoutMs = args.timeoutSeconds * 1000L, rewardDelay = args.rewardDelay).run(args.out, args.funds, args.force)
     }
     outcome match {
       case Success(d) =>
@@ -159,7 +166,8 @@ class Deployer(client: ErgoClient,
                wallet: NodeWallet,
                network: NetworkType,
                timeoutMs: Long = 1800000L,
-               pollMs: Long = 2000L) {
+               pollMs: Long = 2000L,
+               rewardDelay: Int = NodeWallet.MINER_REWARD_DELAY) {
 
   private val logger: Logger = LoggerFactory.getLogger("DeployProtocol")
 
@@ -260,8 +268,10 @@ class Deployer(client: ErgoClient,
   }
 
   /**
-   * Plain boxes under any key the prover holds, and coinbase boxes past their 720-block lock, which
-   * on a devnet is where the deployer's ERG comes from. Token-free only.
+   * Plain boxes under any key the prover holds, and coinbase boxes past their lock (`rewardDelay`
+   * blocks, mainnet's 720 unless the chain says otherwise), which on a devnet is where the deployer's
+   * ERG comes from. The reward script embeds the delay, so a chain with a shorter lock also has a
+   * different reward tree; both follow `rewardDelay`. Token-free only.
    */
   private def loadFunding(ctx: BlockchainContext): Vector[InputUTXO] = {
     val height = ctx.getHeight
@@ -279,8 +289,10 @@ class Deployer(client: ErgoClient,
       acc
     }
     val plain = wallet.signableTrees.toSeq.flatMap(all)
-    val rewards = wallet.rewardTrees.keys.toSeq.flatMap(all)
-      .filter(b => b.box.creationHeight + NodeWallet.MINER_REWARD_DELAY < height)
+    val rewardTrees = (wallet.prover.getAddress +: wallet.addresses).map(a =>
+      Contract(ErgoTreePredef.rewardOutputScript(rewardDelay, a.getPublicKey)).ergoTreeHex).distinct
+    val rewards = rewardTrees.flatMap(all)
+      .filter(b => b.box.creationHeight + rewardDelay < height)
     (plain ++ rewards).filter(_.box.assets.isEmpty).map(_.toInputUTXO(ctx)).distinct.toVector
   }
 

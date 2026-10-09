@@ -31,12 +31,15 @@ The node must run with `ergo.node.extraIndex = true`.
 ```sh
 java -cp "target/universal/stage/lib/*" tools.DeployProtocol --node http://127.0.0.1:9153 --api-key hello \
   --keystore <keystore.json> --pass <pass> --network TESTNET --out deployment.json \
-  [--fund <address>:<nanoERG>:<LIT base units>]... [--force] [--timeout-seconds 1800]
+  [--fund <address>:<nanoERG>:<LIT base units>]... [--force] [--timeout-seconds 1800] [--reward-delay 720]
 ```
 
-It signs with the keystore's EIP-3 index 0 key and spends that key's token-free boxes and matured
-coinbase boxes. Each step is one transaction and waits for confirmation (something must be mining the
-chain):
+It is run by classpath because the stage launcher's `-main` cannot see the application jar. It signs
+with the keystore's EIP-3 index 0 key and spends that key's token-free boxes and matured coinbase
+boxes. A private chain that locks coinbases for fewer blocks than mainnet's 720 also has a different
+reward script, since the delay is part of it: give the chain's lock as `--reward-delay`, or pay the
+key a plain box first. Each step is one transaction and waits for confirmation (something must be
+mining the chain):
 
 1. Mint the eight tokens, one transaction each: LIT (1,000,000,000 at 9 decimals), the emission NFT,
    the emission config NFT, the queue and collateral proposition tokens (`Long.MaxValue` each), the FP
@@ -78,6 +81,18 @@ Ids are 64 hex characters. A Lithos block is one whose first transaction spends 
 
 ## Worked runs
 
-The devnet topology, the indexed mining node, the `/info` rewriting proxy appkit needs, and the
-end-to-end checks are kept outside this repository, in the operator's network-infrastructure
-repository (`rig/examples/lithos-*`).
+The devnet topology, the indexed mining node, the `/info` rewriting proxy appkit needs, a CPU miner,
+and the end-to-end checks are kept outside this repository, in the operator's network-infrastructure
+repository (`rig/examples/lithos-*`). `lithos-block.sh` there goes from a wiped chain to a block the
+client built, in one command. Two things it does that any private-chain run needs:
+
+- **Mine the first blocks with the node's own miner.** A fresh chain's early work is Autolykos v1,
+  which only the node's internal miner solves; it mines with the wallet's first secret and ignores
+  `miningPubKeyHex`. Once block version 4 is active, restart the node with `useExternalMiner = true`
+  and `miningPubKeyHex` set to the client's collateral key and run an external miner against it. The
+  node serves its cached candidate only to a requester whose key matches the candidate's, and the
+  client's packages name its own key.
+- **Start the client from its own directory.** The `bin/lithos-client` launcher sets `user.dir` to
+  the stage directory, so every run through it shares one `.lithos` store there. Running
+  `java -cp "target/universal/stage/lib/*" … play.core.server.ProdServerStart` from a run directory
+  keeps each run's stores apart.
