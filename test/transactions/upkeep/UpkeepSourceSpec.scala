@@ -62,13 +62,16 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
    * @param jobs            how many of the two fake jobs are handed to the source
    * @param retryAfterScans passes a refused box sits out; large unless a spec is about the retry
    * @param supervised      under a restarting parent, for the incarnation test
+   * @param firstScanDelay  long unless a spec is about the timer, so only the spec's ticks scan
    */
-  private class Fixture(enabled: Boolean = true, jobEnabled: Boolean = true, jobs: Int = 1,
+  private class Fixture(jobs: Int = 1,
                         maxBoxes: Int = UpkeepConfig.Default.maxBoxesPerJob,
                         retryAfterScans: Int = 1000,
                         limits: CandidateSourceConfig = defaultLimits,
                         supervised: Boolean = false,
-                        mode: String = UpkeepConfig.Candidate) {
+                        mode: String = UpkeepConfig.Candidate,
+                        verifyWithNode: Boolean = true,
+                        firstScanDelay: FiniteDuration = 1.hour) {
     val api: NodeApi = mock[NodeApi]
     val (nodeContext, _, wallet) = FakeNodeContext(api, numAddresses = 1)
 
@@ -95,13 +98,13 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     val other = new FakeJob(wallet, "other")
     val upkeepConfig: UpkeepConfig = UpkeepConfig.Default.copy(maxBoxesPerJob = maxBoxes,
       retryAfterScans = retryAfterScans, jobs = Map(
-        job.name -> UpkeepConfig.Job(enabled = jobEnabled), other.name -> UpkeepConfig.Job(enabled = jobEnabled)),
-      mode = mode)
+        job.name -> UpkeepConfig.Job(enabled = true), other.name -> UpkeepConfig.Job(enabled = true)),
+      mode = mode, verifyWithNode = verifyWithNode)
     val enabledJobs: Seq[UpkeepJob] = UpkeepRegistry.enabled(upkeepConfig,
       Seq(job, other).take(jobs).map(fake => JobFactory(fake.name, _ => fake)))
     val memory = new UpkeepSource.Memory(retryAfterScans)
-    val props: Props = Props(new UpkeepSource(nodeContext, upkeepConfig, limits.copy(enabled = enabled),
-      enabledJobs, memory, useTrueProp = false))
+    val props: Props = Props(new UpkeepSource(nodeContext, upkeepConfig, limits.copy(enabled = true),
+      enabledJobs, memory, useTrueProp = false, firstScanDelay = firstScanDelay))
     val probe = TestProbe()
     val source: ActorRef =
       if (!supervised) system.actorOf(props)
@@ -138,6 +141,19 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
       }, 20.seconds, 100.millis)
     }
 
+    /**
+     * Observe mode's counterpart: every request is answered empty at once, so the spec asks for the
+     * same height until what the background task does shows. A height is observed once, and only
+     * once a scan has given it something to build.
+     */
+    def observeUntil(height: Int)(landed: => Boolean): Unit = {
+      source ! ScanTick
+      awaitAssert({
+        request(height) shouldBe empty
+        landed shouldBe true
+      }, 20.seconds, 100.millis)
+    }
+
     def readCount: Int = reads.synchronized(reads.size)
 
     def lastRead: Seq[String] = reads.synchronized(reads.last)
@@ -147,29 +163,18 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
 
   // ─── off, or nothing to do ────────────────────────────────────────────────
 
-  "A disabled source" should "answer empty without reading the node" in {
-    val f = new Fixture(enabled = false)
-    val a = f.box("a")
-    f.job.discovered = Seq(a.boxId)
-    f.live = Seq(a)
-
-    f.source ! ScanTick
-    f.request() shouldBe empty
-
-    // The request was handled after the tick, so the tick was ignored rather than still running.
-    f.job.discoveries.get shouldBe 0
-    f.nodeTouched shouldBe false
+  /** A source with nothing to do is never created, so it makes no node read and holds no timer. */
+  "The wiring" should "start a source only when it is enabled and config turns on a job" in {
+    val (_, _, wallet) = FakeNodeContext(mock[NodeApi], numAddresses = 1)
+    val job = new FakeJob(wallet)
+    UpkeepSource.runs(defaultLimits.copy(enabled = true), Seq(job)) shouldBe true
+    UpkeepSource.runs(defaultLimits.copy(enabled = false), Seq(job)) shouldBe false
+    UpkeepSource.runs(defaultLimits.copy(enabled = true), Seq.empty) shouldBe false
   }
 
-  "An enabled source with no enabled job" should "answer empty" in {
-    val f = new Fixture(jobEnabled = false)
-    f.enabledJobs shouldBe empty
-    f.job.discovered = Seq(f.box("a").boxId)
-
-    f.source ! ScanTick
-    f.request() shouldBe empty
-    f.job.discoveries.get shouldBe 0
-    f.nodeTouched shouldBe false
+  "The timer" should "run the first scan soon after start, with no tick sent" in {
+    val f = new Fixture(firstScanDelay = 100.millis)
+    awaitAssert(f.job.discoveries.get should be >= 1, 10.seconds, 50.millis)
   }
 
   // ─── scan and revalidation ────────────────────────────────────────────────
@@ -194,6 +199,17 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     // The read is the revalidation: the id that did not come back is gone from what is held.
     f.request() should have size 1
     f.lastRead shouldBe Seq(a.boxId)
+  }
+
+  it should "read the boxes back in chunks of ReadChunk ids" in {
+    val f = new Fixture(maxBoxes = UpkeepSource.ReadChunk + 44)
+    val boxes = (0 until UpkeepSource.ReadChunk + 44).map(i => f.box(s"chunk$i"))
+    f.job.discovered = boxes.map(_.boxId)
+    f.live = boxes
+    f.job.isDue = false
+
+    f.scanUntil(f.readCount >= 2)
+    f.reads.synchronized(f.reads.take(2).map(_.size)) shouldBe Seq(UpkeepSource.ReadChunk, 44)
   }
 
   it should "keep at most maxBoxesPerJob ids for one job" in {
@@ -266,7 +282,7 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     f.job.builds.get shouldBe 1
   }
 
-  it should "not retry a refused build next block" in {
+  it should "hold a box its job cannot pay for as exhausted, and not build it next block" in {
     val f = new Fixture()
     val a = f.box("a")
     f.job.discovered = Seq(a.boxId)
@@ -276,8 +292,48 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     f.scanUntil(f.job.builds.get == 1) shouldBe empty
 
     f.request() shouldBe empty
-    withClue("a refused box must not be built again: ") { f.job.builds.get shouldBe 1 }
-    f.memory.refusedIds shouldBe Set(a.boxId)
+    withClue("a box that cannot pay must not be built again: ") { f.job.builds.get shouldBe 1 }
+    f.memory.exhaustedIds shouldBe Set(a.boxId)
+    f.memory.refusedIds shouldBe empty
+  }
+
+  /** Cannot pay does not pass with time, so the retry rule that frees a refused box does not apply. */
+  it should "not offer an exhausted box again after retryAfterScans passes" in {
+    val f = new Fixture(retryAfterScans = 2)
+    val poor = f.box("a")
+    val broken = f.box("b")
+    f.job.discovered = Seq(poor.boxId, broken.boxId)
+    f.live = Seq(poor, broken)
+    f.job.behaviour = FakeJob.CannotPayFor(poor.boxId)
+
+    f.scanUntil(f.job.builds.get == 2) shouldBe empty
+    f.memory.exhaustedIds shouldBe Set(poor.boxId)
+    f.memory.passesLeft(broken.boxId) shouldBe Some(2)
+
+    // The refused box sits out its passes and is built again; the exhausted one stays held.
+    f.scanUntil(f.memory.passesLeft(broken.boxId).contains(1)) shouldBe empty
+    f.scanUntil(f.job.builds.get == 3) shouldBe empty
+    f.memory.exhaustedIds shouldBe Set(poor.boxId)
+    f.request() shouldBe empty
+    f.job.builds.get shouldBe 3
+  }
+
+  /** A job that throws after real work must not cost one build a signing for every box it holds. */
+  it should "stop after MaxRefusedPerBuild refusals and leave the rest for a later block" in {
+    val f = new Fixture()
+    val boxes = (0 until UpkeepSource.MaxRefusedPerBuild + 4).map(i => f.box(s"r$i"))
+    f.job.discovered = boxes.map(_.boxId)
+    f.live = boxes
+    f.job.behaviour = FakeJob.Throw
+
+    f.scanUntil(f.job.builds.get >= 1) shouldBe empty
+    f.job.builds.get shouldBe UpkeepSource.MaxRefusedPerBuild
+    f.memory.refusedIds should have size UpkeepSource.MaxRefusedPerBuild.toLong
+
+    // The four not tried were not refused: the next block tries them.
+    f.request() shouldBe empty
+    f.job.builds.get shouldBe UpkeepSource.MaxRefusedPerBuild + 4
+    f.memory.refusedIds should have size (UpkeepSource.MaxRefusedPerBuild + 4).toLong
   }
 
   it should "treat a build that throws as refused" in {
@@ -330,7 +386,7 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     f.memory.refusedIds shouldBe Set(b.boxId)
   }
 
-  it should "forget a refusal once no scan finds the box any more" in {
+  it should "forget an exhausted box once no scan finds it any more" in {
     val f = new Fixture()
     val a = f.box("a")
     f.job.discovered = Seq(a.boxId)
@@ -338,11 +394,11 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     f.job.behaviour = FakeJob.Refuse
 
     f.scanUntil(f.job.builds.get == 1) shouldBe empty
-    f.memory.refusedIds shouldBe Set(a.boxId)
+    f.memory.exhaustedIds shouldBe Set(a.boxId)
 
     // The box changed: its successor has a new id, and the old one is not discovered again.
     f.job.discovered = Seq.empty
-    f.scanUntil(f.memory.refusedIds.isEmpty)
+    f.scanUntil(f.memory.exhaustedIds.isEmpty)
 
     // Were the same id found again it would be a box to try, not a box refused.
     f.job.discovered = Seq(a.boxId)
@@ -378,7 +434,7 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     val a = f.box("a")
     f.job.discovered = Seq(a.boxId)
     f.live = Seq(a)
-    f.job.behaviour = FakeJob.Refuse
+    f.job.behaviour = FakeJob.Throw
 
     f.scanUntil(f.job.builds.get == 1) shouldBe empty
     f.scanUntil(f.memory.passesLeft(a.boxId).contains(1)) shouldBe empty
@@ -424,6 +480,24 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     f.request() should have size 1
   }
 
+  /** A box deferred at the head every block would otherwise keep every box behind it waiting. */
+  it should "start the box order at the block height modulo the number of boxes" in {
+    val f = new Fixture(limits = defaultLimits.copy(maxTxs = 1))
+    val boxes = Seq("a", "b", "c").map(f.box)
+    f.job.discovered = boxes.map(_.boxId)
+    f.live = boxes
+    f.scanUntil(f.readCount > 0)
+
+    val ordered = boxes.map(_.boxId).sorted
+    Seq(900, 901, 902, 903).foreach { height =>
+      val bundles = f.request(height)
+      bundles should have size 1
+      bundles.head.members.head.inputIds shouldBe Set(ordered(height % 3))
+    }
+    UpkeepSource.rotated(Seq(1, 2, 3), 4) shouldBe Seq(2, 3, 1)
+    UpkeepSource.rotated(Seq.empty[Int], 7) shouldBe empty
+  }
+
   it should "stop building once maxTxs successors are ready, and leave the rest for a later block" in {
     val f = new Fixture(limits = defaultLimits.copy(maxTxs = 1))
     val boxes = Seq("a", "b", "c").map(f.box)
@@ -440,14 +514,14 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
 
   // ─── observe mode ─────────────────────────────────────────────────────────
 
-  "Observe mode" should "answer empty and put each built successor through the node's check once" in {
+  "Observe mode" should "answer empty at once and check each built successor once, in the background" in {
     val f = new Fixture(mode = UpkeepConfig.Observe)
     val a = f.box("a")
     val b = f.box("b")
     f.job.discovered = Seq(a.boxId, b.boxId)
     f.live = Seq(a, b)
 
-    f.scanUntil(f.job.builds.get >= 2) shouldBe empty
+    f.observeUntil(nextHeight())(f.checkCount >= 2)
     f.job.builds.get shouldBe 2
     f.checkCount shouldBe 2
     f.checked.synchronized(f.checked.toSet.size) shouldBe 2
@@ -455,22 +529,24 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
 
     // Every block is checked again: what is being watched is the job, block after block.
     f.request() shouldBe empty
+    awaitAssert(f.checkCount shouldBe 4, 20.seconds, 100.millis)
     f.job.builds.get shouldBe 4
-    f.checkCount shouldBe 4
   }
 
-  it should "check once per height, serving a request from what was prepared for it" in {
+  it should "observe a height once, however often it is prepared or asked for" in {
     val f = new Fixture(mode = UpkeepConfig.Observe)
     val a = f.box("a")
     f.job.discovered = Seq(a.boxId)
     f.live = Seq(a)
-    f.scanUntil(f.job.builds.get >= 1)
+    f.observeUntil(nextHeight())(f.checkCount >= 1)
     val checks = f.checkCount
 
     val height = nextHeight()
     f.source ! PrepareBlockTxs(height, defaultLimits.maxTxs)
     f.request(height) shouldBe empty
     f.request(height) shouldBe empty
+    awaitAssert(f.checkCount shouldBe checks + 1, 20.seconds, 100.millis)
+    Thread.sleep(300)
     f.checkCount shouldBe checks + 1
   }
 
@@ -482,15 +558,42 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     f.live = Seq(a)
     f.checkRefuses = true
 
-    f.scanUntil(f.job.builds.get >= 1) shouldBe empty
-    f.checkCount shouldBe f.job.builds.get
+    f.observeUntil(nextHeight())(f.checkCount >= 1)
     f.memory.refusedIds shouldBe empty
     f.request() shouldBe empty
-    f.checkCount shouldBe f.job.builds.get
+    awaitAssert(f.checkCount shouldBe 2, 20.seconds, 100.millis)
+    f.memory.refusedIds shouldBe empty
   }
 
-  "Candidate mode" should "offer what it builds and never ask the node's check" in {
+  // ─── verifyWithNode ───────────────────────────────────────────────────────
+
+  "Candidate mode" should "offer a successor the node's check accepts" in {
     val f = new Fixture()
+    val a = f.box("a")
+    f.job.discovered = Seq(a.boxId)
+    f.live = Seq(a)
+
+    f.scanUntil(f.job.builds.get >= 1) should have size 1
+    f.checkCount shouldBe 1
+  }
+
+  it should "leave out and refuse a successor the node's check refuses" in {
+    val f = new Fixture()
+    val a = f.box("a")
+    f.job.discovered = Seq(a.boxId)
+    f.live = Seq(a)
+    f.checkRefuses = true
+
+    f.scanUntil(f.job.builds.get >= 1) shouldBe empty
+    f.checkCount shouldBe 1
+    f.memory.refusedIds shouldBe Set(a.boxId)
+
+    f.request() shouldBe empty
+    f.job.builds.get shouldBe 1
+  }
+
+  it should "offer without asking the node's check when verifyWithNode is off" in {
+    val f = new Fixture(verifyWithNode = false)
     val a = f.box("a")
     f.job.discovered = Seq(a.boxId)
     f.live = Seq(a)
@@ -528,7 +631,7 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     val a = f.box("a")
     f.job.discovered = Seq(a.boxId)
     f.live = Seq(a)
-    f.job.behaviour = FakeJob.Refuse
+    f.job.behaviour = FakeJob.Throw
 
     f.scanUntil(f.job.builds.get == 1) shouldBe empty
     f.memory.passesLeft(a.boxId) shouldBe Some(5)

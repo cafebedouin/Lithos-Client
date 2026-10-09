@@ -111,17 +111,19 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
         val ergoDexSource = batcherSource(configs.CandidateSourceConfig.ErgoDex, ergoDexBatcher)
 
         // Upkeep: keyless maintenance of other protocols' boxes, off by default and never spending
-        // this wallet. Only the jobs config turns on are handed in, so a source with none is idle.
+        // this wallet. No actor exists unless the source is enabled and config turns on a job.
         val upkeepLimits = limitsFor(configs.CandidateSourceConfig.Upkeep)
-        val upkeepSource = if (!upkeepLimits.enabled) None else {
-          val upkeepConfig = configs.UpkeepConfig(config)
-          val jobs = transactions.upkeep.UpkeepRegistry.enabled(upkeepConfig)
+        val upkeepConfig = configs.UpkeepConfig(config)
+        val upkeepJobs =
+          if (upkeepLimits.enabled) transactions.upkeep.UpkeepRegistry.enabled(upkeepConfig)
+          else Seq.empty[transactions.upkeep.UpkeepJob]
+        val upkeepSource = if (!transactions.upkeep.UpkeepSource.runs(upkeepLimits, upkeepJobs)) None else {
           // Built here rather than inside the actor, so every incarnation after a restart shares it
           // and a refused box is not offered to the node again.
           val memory = new transactions.upkeep.UpkeepSource.Memory(upkeepConfig.retryAfterScans)
           Some(mining.MiningMessages.CandidateSource(configs.CandidateSourceConfig.Upkeep,
             system.actorOf(akka.actor.Props(new transactions.upkeep.UpkeepSource(
-              nodeConfig, upkeepConfig, upkeepLimits, jobs, memory,
+              nodeConfig, upkeepConfig, upkeepLimits, upkeepJobs, memory,
               stratumParams.candidate.useTruePropCollection)), "upkeep-source")))
         }
 

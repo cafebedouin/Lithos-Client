@@ -23,40 +23,37 @@ import scala.util.{Failure, Success, Try}
  * the ones the job says are due, has the job build each successor until this source's share is
  * spent, and answers through [[transactions.candidate.CandidatePreparation]]. Ids are all that is
  * kept between the two because the read that fetches a box back is the only check that matters: a
- * box that does not come back is already spent, and a box that does is judged fresh.
+ * box that does not come back is spent, or spent by a pending transaction, and a box that does is
+ * judged fresh. Nothing on the mining path reads the actor's fields; the build closes over values
+ * it is handed and reports back by message.
  *
- * Nothing on the mining path reads the actor's fields. The build closes over values it is handed
- * and reports back by message, so a scan landing mid-build cannot change what the build sees.
+ * Never extractive. Nothing here reads pending transactions, so nothing reorders or front-runs
+ * anyone, and a job's transaction may only spend the boxes that job discovered.
  *
- * Refusals outlive the actor. A box a job could not advance is remembered in a [[UpkeepSource.Memory]]
- * handed in from outside, so a restart — which empties every field here — does not offer the
- * node the same transaction again. The box is forgotten when a scan stops finding it, which is
- * what happens when it changes, or offered once more after the configured number of passes, in
- * case what refused it has passed too.
+ * A box a job could not advance is held in a [[UpkeepSource.Memory]] that outlives the actor, so a
+ * restart does not offer the node the same transaction again. A box the job says cannot pay is held
+ * until a scan stops finding it; one whose build failed is offered again after the configured
+ * number of passes, in case what refused it has passed.
  *
- * One box's trouble stays with that box. Every call into a job is caught, and a box whose
- * successor cannot be built, or cannot even be read, is refused on its own; the others in the same
- * job and every other job's are offered as usual, and the source answers whatever happened.
- *
- * In observe mode (`mode = "observe"`) everything above runs as it would, and each successor the
- * share admits is put through the node's transaction check before the block is answered empty.
- * The check is the node's own verdict on the transaction as it would have been offered, which is
- * the one thing a miner with no block yet cannot otherwise see; it is one node call per successor,
- * made on the build thread like the rest of the build, and a refusal there is logged and nothing
- * more, because what is being watched is the job, and a box set aside would stop being watched.
- *
- * Never extractive. This source spends only the boxes its jobs discovered, in the order their
- * scripts allow, and nothing here reads, reorders or front-runs anyone else's transaction.
+ * In candidate mode with `verifyWithNode`, every successor the share admits is put through the
+ * node's transaction check before it is offered, and one the node refuses is refused here. The
+ * check runs in the build, which starts on `PrepareBlockTxs` and so off the request path, and the
+ * node evaluates it at the next block's height, the same height the candidate is built for. In
+ * observe mode every request is answered empty at once, and the build and the checks run as a task
+ * of their own on the worker that no request waits for.
  */
 class UpkeepSource(nodeContext: NodeContext,
                    upkeepConfig: UpkeepConfig,
                    limits: CandidateSourceConfig,
                    jobs: Seq[UpkeepJob],
                    memory: UpkeepSource.Memory,
-                   useTrueProp: Boolean) extends Actor {
+                   useTrueProp: Boolean,
+                   firstScanDelay: FiniteDuration = UpkeepSource.FirstScanDelay) extends Actor {
 
   import UpkeepSource._
 
+  require(runs(limits, jobs), s"an upkeep source needs to be enabled with a job: enabled=${limits.enabled}, " +
+    s"jobs=${jobs.map(_.name).mkString(", ")}")
   require(jobs.map(_.name).distinct.size == jobs.size,
     s"upkeep job names must be distinct: ${jobs.map(_.name).mkString(", ")}")
 
@@ -69,31 +66,27 @@ class UpkeepSource(nodeContext: NodeContext,
 
   protected def nodeApi: NodeApi = nodeContext.getNodeApi
 
-  /**
-   * Whether this source has anything to do at all. Decided once, because neither input changes
-   * while the actor lives, and a source with nothing to do must make no node read: not on the
-   * timer, which is never started, and not on a request, which is answered empty at once.
-   */
-  private val active: Boolean = limits.enabled && jobs.nonEmpty
-
   /** What each job's last successful discovery returned, less what builds have since found spent. */
   private var tracked: Map[String, Set[String]] = Map.empty
 
   private var scanning: Boolean = false
   private var ticker: Option[Cancellable] = None
 
-  override def preStart(): Unit =
-    if (!active) {
-      logger.info(s"UpkeepSource idle: enabled=${limits.enabled}, jobs=${jobs.map(_.name).mkString(", ")}")
-    } else {
-      logger.info(s"UpkeepSource started: mode=${upkeepConfig.mode}, jobs=${jobs.map(_.name).mkString(", ")}, " +
-        s"scanIntervalMs=${upkeepConfig.scanIntervalMs}, maxBoxesPerJob=${upkeepConfig.maxBoxesPerJob}, " +
-        s"retryAfterScans=${memory.retryAfterScans}, share: txs=${limits.maxTxs}, " +
-        s"bytes=${limits.maxBytes}, cost=${limits.maxCost}; refusedHeld=${memory.refusedIds.size}")
-      ticker = Some(context.system.scheduler.scheduleWithFixedDelay(
-        upkeepConfig.scanIntervalMs.milliseconds, upkeepConfig.scanIntervalMs.milliseconds,
-        self, ScanTick)(context.dispatcher))
-    }
+  /** What the last scan line reported, so an unchanged holding is logged at debug. */
+  private var lastHolding: Option[(Map[String, Int], Int, Int)] = None
+
+  /** The highest height observe mode has started a task for, so each height is observed once. */
+  private var observedThrough: Int = Int.MinValue
+
+  override def preStart(): Unit = {
+    logger.info(s"UpkeepSource started: mode=${upkeepConfig.mode}, verifyWithNode=${upkeepConfig.verifyWithNode}, " +
+      s"jobs=${jobs.map(_.name).mkString(", ")}, scanIntervalMs=${upkeepConfig.scanIntervalMs}, " +
+      s"maxBoxesPerJob=${upkeepConfig.maxBoxesPerJob}, retryAfterScans=${memory.retryAfterScans}, " +
+      s"share: txs=${limits.maxTxs}, bytes=${limits.maxBytes}, cost=${limits.maxCost}; " +
+      s"refusedHeld=${memory.refusedIds.size}, exhaustedHeld=${memory.exhaustedIds.size}")
+    ticker = Some(context.system.scheduler.scheduleWithFixedDelay(
+      firstScanDelay, upkeepConfig.scanIntervalMs.milliseconds, self, ScanTick)(context.dispatcher))
+  }
 
   override def postStop(): Unit = ticker.foreach(_.cancel())
 
@@ -101,7 +94,7 @@ class UpkeepSource(nodeContext: NodeContext,
 
   private def upkeepReceive: Receive = {
 
-    case ScanTick if active && !scanning =>
+    case ScanTick if !scanning =>
       scanning = true
       Future(scan())(candidateWorker).onComplete(result => self ! Scanned(result))
 
@@ -118,10 +111,12 @@ class UpkeepSource(nodeContext: NodeContext,
       if (retried.nonEmpty)
         logger.info(s"Upkeep offers ${retried.size} refused boxes again after ${memory.retryAfterScans} " +
           s"passes: ${retried.toSeq.sorted.map(_.take(8)).mkString(", ")}")
-      if (known.nonEmpty)
-        logger.info(s"Upkeep scan holds ${known.size} boxes: " +
-          tracked.map { case (job, ids) => s"$job=${ids.size}" }.mkString(", ") +
-          s"; ${memory.refusedIds.size} refused")
+      val holding = (tracked.map { case (job, ids) => job -> ids.size }, memory.refusedIds.size, memory.exhaustedIds.size)
+      val line = s"Upkeep scan holds ${known.size} boxes: " +
+        tracked.map { case (job, ids) => s"$job=${ids.size}" }.mkString(", ") +
+        s"; ${holding._2} refused, ${holding._3} cannot pay"
+      if (lastHolding.contains(holding)) logger.debug(line) else logger.info(line)
+      lastHolding = Some(holding)
 
     case Scanned(Failure(ex)) =>
       scanning = false
@@ -133,20 +128,31 @@ class UpkeepSource(nodeContext: NodeContext,
       tracked = tracked.map { case (job, held) => job -> (held -- ids) }
       memory.forget(ids)
 
-    // A job said due and then could not advance the box, or advanced it with a transaction this
-    // source will not carry. Offered every block, each would cost a build and a node read for the
-    // same answer, so the box is dropped until a scan stops finding it or enough passes go by.
+    // A build failed, or made a transaction this source or the node will not carry. Offered every
+    // block, each would cost a build for the same answer, so the box sits out a number of passes.
     case Refused(ids) =>
       memory.refuse(ids)
       logger.warn(s"Dropped ${ids.size} upkeep boxes whose builds were refused; holding ${memory.refusedIds.size}")
 
+    // The job says the box cannot pay for its successor. That does not pass with time, so the box
+    // is held until a scan stops finding it, and each one is reported once.
+    case Exhausted(ids) =>
+      val fresh = memory.exhaust(ids)
+      if (fresh.nonEmpty)
+        logger.info(s"Upkeep holds back ${fresh.size} boxes that cannot pay for their successors until a " +
+          s"scan stops finding them: ${fresh.toSeq.sorted.map(_.take(8)).mkString(", ")}")
+
     // ── the candidate path ──────────────────────────────────────────────────
 
-    case PrepareBlockTxs(blockHeight, _) => startBuild(blockHeight, None)
+    case PrepareBlockTxs(blockHeight, _) =>
+      if (upkeepConfig.observing) observe(blockHeight) else startBuild(blockHeight, None)
 
     case RequestBlockTxs(blockHeight, _, refresh) =>
       val replyTo = sender()
-      preparation.preparedFor(blockHeight).filterNot(_ => refresh) match {
+      if (upkeepConfig.observing) {
+        replyTo ! BlockTxsReady(blockHeight, Seq.empty[CandidateBundle])
+        observe(blockHeight)
+      } else preparation.preparedFor(blockHeight).filterNot(_ => refresh) match {
         case Some(bundles) => replyTo ! BlockTxsReady(blockHeight, bundles)
         case None => startBuild(blockHeight, Some(replyTo))
       }
@@ -156,42 +162,63 @@ class UpkeepSource(nodeContext: NodeContext,
     case CandidateTxsDropped(blockHeight) => preparation.drop(blockHeight)
   }
 
-  private def startBuild(blockHeight: Int, replyTo: Option[ActorRef]): Unit = {
-    // Read here rather than inside the build: everything the build touches has to be a value it
-    // was handed, because it runs off the mailbox.
-    val refused = memory.refusedIds
-    val work = if (!active) Seq.empty[JobWork] else jobs.flatMap { job =>
+  /** Each job's work for one build, read here because the build runs off the mailbox. */
+  private def offered(): Seq[JobWork] = {
+    val held = memory.heldIds
+    jobs.flatMap { job =>
       val discovered = tracked.getOrElse(job.name, Set.empty[String])
-      val offered = discovered -- refused
+      val offered = discovered -- held
       if (offered.isEmpty) None else Some(JobWork(job, discovered, offered))
     }
+  }
+
+  private def startBuild(blockHeight: Int, replyTo: Option[ActorRef]): Unit = {
+    val work = offered()
     if (work.isEmpty) preparation.answerEmpty(blockHeight, replyTo)
-    else preparation.start(blockHeight, replyTo)(advance(work, blockHeight))
+    else preparation.start(blockHeight, replyTo) {
+      val chosen = advance(work, blockHeight)
+      (if (upkeepConfig.verifyWithNode) verified(chosen, blockHeight) else chosen).map(_.bundle)
+    }
   }
 
   /**
-   * Read every offered box back, build a successor for each one its job says is due until the
-   * share is spent, and offer what fits.
-   *
-   * The read is the revalidation: ids that do not come back are spent and are forgotten. A read
-   * that fails altogether builds nothing and forgets nothing, because the boxes are most likely
-   * still there and the next block will ask again.
-   *
-   * Building stops at the share rather than at the boxes. Every due box costs a signing, and a
-   * busy job may hold many more than the share has slots for, so a box is sized before it is
-   * signed — from its own bytes and the node's parameters — and left for a later block when its
-   * floor does not fit, and nothing at all is signed once the share is full. The boxes left over
-   * are not refused: they are tried again next block, in a different order once the advanced
-   * ones have new ids.
+   * Observe mode's task for one height: the build and a node check of each successor, started once
+   * per height and never awaited, so a slow node costs no request anything. A height with nothing
+   * to build is not counted, so the first request after a scan lands starts the task.
    */
-  private def advance(work: Seq[JobWork], blockHeight: Int): Seq[CandidateBundle] =
+  private def observe(blockHeight: Int): Unit =
+    if (blockHeight > observedThrough) {
+      val work = offered()
+      if (work.nonEmpty) {
+        observedThrough = blockHeight
+        Try(Future(advance(work, blockHeight).foreach(report(_, blockHeight)))(candidateWorker))
+          .failed.foreach(ex => logger.warn(s"Upkeep could not observe $blockHeight: ${ex.getMessage}"))
+      }
+    }
+
+  /**
+   * Read every offered box back, build a successor for each one its job says is due until the
+   * share is spent, and return what the share admitted.
+   *
+   * The read is the revalidation, in chunks of [[ReadChunk]] ids: ids that do not come back are
+   * spent and are forgotten. It is the node's mempool-adjusted view, so a box a pending transaction
+   * spends is skipped for this block. A read that fails builds nothing and forgets nothing.
+   *
+   * A box is sized before it is signed and left for a later block when its floor does not fit, and
+   * nothing is signed once the share is full or [[MaxRefusedPerBuild]] boxes have been refused. The
+   * order starts at `blockHeight` modulo the number of boxes, so a box deferred at the head every
+   * block does not starve the ones behind it.
+   */
+  private def advance(work: Seq[JobWork], blockHeight: Int): Vector[Upkeep.Prepared] =
     Try(nodeContext.getClient.execute { ctx =>
       val ids = work.flatMap(_.offered).distinct
-      val live = nodeApi.boxesWithPoolByIds(ids) match {
-        case Success(boxes) => boxes
-        case Failure(ex) =>
-          throw new IllegalStateException(s"could not read ${ids.size} upkeep boxes back: ${ex.getMessage}")
-      }
+      val live = ids.grouped(ReadChunk).flatMap { chunk =>
+        nodeApi.boxesWithPoolByIds(chunk) match {
+          case Success(boxes) => boxes
+          case Failure(ex) =>
+            throw new IllegalStateException(s"could not read ${chunk.size} upkeep boxes back: ${ex.getMessage}")
+        }
+      }.toVector
       val byId = live.map(box => box.boxId -> box).toMap
       val gone = ids.toSet -- byId.keySet
       if (gone.nonEmpty) self ! Spent(gone)
@@ -201,10 +228,12 @@ class UpkeepSource(nodeContext: NodeContext,
         CandidateCapital.collectionContract(nodeContext.getNodeWallet, useTrueProp))
       var share = Upkeep.Share.of(limits.maxTxs, limits.budget)
       var refused = Set.empty[String]
+      var exhausted = Set.empty[String]
       var due = 0
       var deferred = 0
-      val queue = work.iterator.flatMap(item => item.offered.toSeq.sorted.flatMap(byId.get).map(item -> _))
-      while (!share.full && queue.hasNext) {
+      val ordered = work.flatMap(item => item.offered.toSeq.sorted.flatMap(byId.get).map(item -> _))
+      val queue = rotated(ordered, blockHeight).iterator
+      while (!share.full && refused.size < MaxRefusedPerBuild && queue.hasNext) {
         val (item, box) = queue.next()
         attempt(bc, item, box, share) match {
           case Attempt.Ready(successor, admitted) =>
@@ -217,43 +246,66 @@ class UpkeepSource(nodeContext: NodeContext,
             due += 1
             deferred += 1
             logger.debug(s"Upkeep job ${item.job.name} leaves ${box.boxId} for a later block: $reason")
+          case Attempt.Exhausted =>
+            due += 1
+            exhausted += box.boxId
           case Attempt.Refused(reason) =>
-            logger.warn(s"Upkeep job ${item.job.name} cannot advance ${box.boxId} at $blockHeight: " +
-              s"$reason; it is no longer offered")
+            logger.warn(s"Upkeep job ${item.job.name} cannot advance ${box.boxId} at $blockHeight: $reason")
             refused += box.boxId
         }
       }
       if (refused.nonEmpty) self ! Refused(refused)
+      if (exhausted.nonEmpty) self ! Exhausted(exhausted)
+      if (refused.size >= MaxRefusedPerBuild && queue.hasNext)
+        logger.warn(s"Upkeep stopped building at $blockHeight after $MaxRefusedPerBuild refusals; " +
+          "the boxes not yet tried wait for a later block")
 
       val chosen = share.chosen
       if (chosen.nonEmpty || deferred > 0)
-        logger.info(s"Upkeep ${if (upkeepConfig.observing) "would offer" else "offers"} " +
+        logger.info(s"Upkeep ${if (upkeepConfig.observing) "would offer" else "admits"} " +
           s"${chosen.size} of $due due successors at $blockHeight" +
           (if (deferred > 0) s", $deferred left for a later block" else "") +
-          (if (queue.hasNext) ", share full before every box was tried" else "") +
+          (if (share.full && queue.hasNext) ", share full before every box was tried" else "") +
           s": ${chosen.map(_.label).mkString(", ")}; share used " +
           s"txs=${chosen.size}/${limits.maxTxs}, bytes=${share.usedBytes(limits.budget)}/${limits.maxBytes}, " +
           s"cost=${share.usedCost(limits.budget)}/${limits.maxCost}")
-      if (upkeepConfig.observing) {
-        chosen.foreach(observe(_, blockHeight))
-        Seq.empty[CandidateBundle]
-      } else chosen.map(_.bundle)
+      chosen
     }) match {
-      case Success(bundles) => bundles
+      case Success(chosen) => chosen
       case Failure(ex) =>
         logger.warn(s"Upkeep built nothing for $blockHeight: ${ex.getMessage}")
-        Seq.empty[CandidateBundle]
+        Vector.empty[Upkeep.Prepared]
     }
+
+  /**
+   * The successors the node's transaction check accepts. One the node refuses is refused here, so
+   * it is not built again every block, and is left out: a package the node rejects loses every
+   * inserted transaction with it. A check that cannot be made counts as a refusal for the same
+   * reason.
+   */
+  private def verified(chosen: Vector[Upkeep.Prepared], blockHeight: Int): Vector[Upkeep.Prepared] = {
+    val (accepted, refused) = chosen.partition { successor =>
+      Try(nodeApi.checkTransaction(successor.tx.json)).flatten match {
+        case Success(_) => true
+        case Failure(ex) =>
+          logger.warn(s"Upkeep ${successor.label} at $blockHeight is refused by the node's check: ${ex.getMessage}")
+          false
+      }
+    }
+    if (refused.nonEmpty) self ! Refused(refused.map(_.boxId).toSet)
+    if (chosen.nonEmpty) logger.info(s"Upkeep offers ${accepted.size} of ${chosen.size} successors at $blockHeight " +
+      s"after the node's check: ${accepted.map(_.label).mkString(", ")}")
+    accepted
+  }
 
   /**
    * One box through its job: due or not; if due, whether it is worth building against what is
    * left of the share; and if built, a successor admitted to the share or the reason there is none.
    *
    * Every call into the job is caught, because a job is reviewed code but not trusted code, and a
-   * throw on one box must not cost the block every other box's successor. Parsing the box is
-   * inside the same net: a box the node reports in a form this client cannot read is that box's
-   * problem. One whose serialized form does not hash to the id the node gave it is refused before
-   * the job sees it, since a transaction built from it would spend a box that does not exist.
+   * throw on one box must not cost the block every other box's successor. A box whose serialized
+   * form does not hash to the id the node gave it is refused before the job sees it, since a
+   * transaction built from it would spend a box that does not exist.
    */
   private def attempt(bc: BuildContext, item: JobWork, box: NodeBox, share: Upkeep.Share): Attempt = {
     val job = item.job
@@ -270,7 +322,7 @@ class UpkeepSource(nodeContext: NodeContext,
             Attempt.Deferred(s"at least ${floorBytes}B and $floorCost cost, over the " +
               s"${share.bytes}B and ${share.cost} cost left of the share")
           else build(bc, item, input) match {
-            case Left(reason) => Attempt.Refused(reason)
+            case Left(outcome) => outcome
             case Right(successor) => share.admit(successor) match {
               case Some(admitted) => Attempt.Ready(successor, admitted)
               case None if successor.tx.inputIds.exists(share.claimed.contains) =>
@@ -283,29 +335,34 @@ class UpkeepSource(nodeContext: NodeContext,
     }
   }
 
-  /** The job's successor for one due box, sized, or why this source will not carry it. */
-  private def build(bc: BuildContext, item: JobWork, input: InputUTXO): Either[String, Upkeep.Prepared] =
-    Try {
-      item.job.build(input, bc) match {
-        case None => Left("the job could not build a successor")
-        case Some(built) =>
-          val foreign = Upkeep.undiscoveredInputs(built.tx, item.discovered)
-          if (foreign.nonEmpty)
-            Left(s"its successor spends ${foreign.size} box(es) the job never discovered: ${foreign.mkString(", ")}")
-          else Right(Upkeep.Prepared(item.job.name, input.id.toString,
-            Upkeep.member(built.tx, item.job.name, input, bc.params), built.capital))
+  /**
+   * The job's successor for one due box, sized, or why there is none: [[Attempt.Exhausted]] when
+   * the job says the box cannot pay, [[Attempt.Refused]] when the build throws or spends a box the
+   * job never discovered.
+   */
+  private def build(bc: BuildContext, item: JobWork, input: InputUTXO): Either[Attempt, Upkeep.Prepared] =
+    Try(item.job.build(input, bc)).flatMap[Either[Attempt, Upkeep.Prepared]] {
+      case None => Success(Left(Attempt.Exhausted))
+      case Some(built) => Try {
+        val foreign = Upkeep.undiscoveredInputs(built.tx, item.discovered)
+        if (foreign.nonEmpty)
+          Left(Attempt.Refused(s"its successor spends ${foreign.size} box(es) the job never discovered: " +
+            foreign.mkString(", ")))
+        else Right(Upkeep.Prepared(item.job.name, input.id.toString,
+          Upkeep.member(built.tx, item.job.name, input, bc.params), built.capital))
       }
     } match {
-      case Failure(ex) => Left(s"build failed: ${ex.getMessage}")
+      case Failure(ex) => Left(Attempt.Refused(s"build failed: ${ex.getMessage}"))
       case Success(outcome) => outcome
     }
 
   /**
    * Observe mode's report on one successor the block would have carried: the node's verdict on the
-   * signed transaction, and what it would have cost the block and paid this miner. A check that
-   * cannot be made at all is reported as such, and costs only this line.
+   * signed transaction, and what it would have cost the block and paid this miner. A refusal is
+   * logged and nothing more, because what is being watched is the job, and a box set aside would
+   * stop being watched.
    */
-  private def observe(successor: Upkeep.Prepared, blockHeight: Int): Unit = {
+  private def report(successor: Upkeep.Prepared, blockHeight: Int): Unit = {
     val offer = s"Upkeep observe at $blockHeight: ${successor.label} as tx ${successor.tx.id}, " +
       s"${successor.tx.sizeBytes}B, ${successor.tx.cost} cost, paying " +
       s"${successor.capital.map(_.value).sum} nanoERG to this miner"
@@ -343,32 +400,57 @@ class UpkeepSource(nodeContext: NodeContext,
 object UpkeepSource {
 
   /**
-   * Boxes whose builds were refused, held outside the actor so a restart cannot forget them, and
-   * how many passes each has left to sit out.
+   * Boxes refused in one build before the build stops. A job that throws after real work, such as
+   * signing, would otherwise cost a build one signing for every box it holds, hundreds of them, on
+   * every block until the refusals land; the boxes not tried wait for the next block.
+   */
+  final val MaxRefusedPerBuild = 16
+
+  /** Ids per read-back call, so a job holding thousands of boxes never makes one huge request. */
+  final val ReadChunk = 256
+
+  /** When the first scan runs after start: soon, so a fresh client has boxes before its first block. */
+  final val FirstScanDelay: FiniteDuration = 2.seconds
+
+  /** Whether a source should exist at all. One that would have nothing to do is never created. */
+  def runs(limits: CandidateSourceConfig, jobs: Seq[UpkeepJob]): Boolean = limits.enabled && jobs.nonEmpty
+
+  /** `xs` started at `height` modulo its length, wrapping around. */
+  private[upkeep] def rotated[A](xs: Seq[A], height: Int): Seq[A] =
+    if (xs.isEmpty) xs
+    else {
+      val start = Math.floorMod(height, xs.size)
+      xs.drop(start) ++ xs.take(start)
+    }
+
+  /**
+   * Boxes held back from builds, outside the actor so a restart cannot forget them.
    *
-   * Akka rebuilds a restarted actor from its `Props`, which empties every field; a refusal that
-   * lived in one would be offered to the node again by the new incarnation, at a build and a node
-   * read per block. Constructed once where the source is wired and handed to every incarnation.
-   * Only the actor's own thread touches it, so the atomic is for visibility across restarts, not
-   * for contention.
+   * Akka rebuilds a restarted actor from its `Props`, which empties every field, so the memory is
+   * constructed once where the source is wired and handed to every incarnation. Only the actor's
+   * own thread touches it; the atomics are for visibility across restarts, not contention.
    *
-   * A refusal is not for good. What refused a box may have been the box — a successor it can no
-   * longer pay for — or may have been the moment: a node that could not be read, a job tripped by
-   * something that has since passed. The two cannot be told apart from here, so every refusal
-   * expires after `retryAfterScans` passes have found the box still unchanged, and a box refused
-   * again sits out as many passes again. A box no pass finds any more is forgotten at once, since
-   * it has changed or gone.
+   * Two kinds of hold. A box refused, whose build failed, may have been refused by the moment — a
+   * node that could not be read, a job tripped by something that has since passed — so it expires
+   * after `retryAfterScans` passes have found it unchanged, and a box refused again sits out as
+   * many again. A box exhausted, which its job says cannot pay, will not pay later either, so it is
+   * held until a scan stops finding it. Either is dropped at once when no pass finds the box.
    *
    * @param retryAfterScans passes a refused box sits out, counted from the first that lands after
-   *                        the refusal. Read from config where the memory is wired and held only
-   *                        here, so the source's logs and its retry rule cannot disagree.
+   *                        the refusal
    */
   final class Memory(val retryAfterScans: Int) {
     require(retryAfterScans > 0, s"retryAfterScans must be positive, not $retryAfterScans")
 
     private val refused = new AtomicReference[Map[String, Int]](Map.empty[String, Int])
+    private val exhausted = new AtomicReference[Set[String]](Set.empty[String])
 
     def refusedIds: Set[String] = refused.get().keySet
+
+    def exhaustedIds: Set[String] = exhausted.get()
+
+    /** Every box no build is offered. */
+    def heldIds: Set[String] = refusedIds ++ exhaustedIds
 
     /** Passes `id` has left to sit out, or nothing when it is not refused. */
     def passesLeft(id: String): Option[Int] = refused.get().get(id)
@@ -376,16 +458,27 @@ object UpkeepSource {
     def refuse(ids: Set[String]): Unit =
       refused.set(refused.get() ++ ids.map(_ -> retryAfterScans))
 
+    /** Holds `ids` as unable to pay, and returns the ones not already held, to be reported. */
+    def exhaust(ids: Set[String]): Set[String] = {
+      val before = exhausted.get()
+      exhausted.set(before ++ ids)
+      refused.set(refused.get() -- ids)
+      ids -- before
+    }
+
     /** Boxes a build found spent: nothing to retry. */
-    def forget(ids: Set[String]): Unit = refused.set(refused.get() -- ids)
+    def forget(ids: Set[String]): Unit = {
+      refused.set(refused.get() -- ids)
+      exhausted.set(exhausted.get() -- ids)
+    }
 
     /**
-     * One pass landed, finding `known`. Drops every refusal outside it, counts the pass against
-     * the rest, and returns the ids that have sat out their passes and are offered again.
+     * One pass landed, finding `known`. Drops every hold outside it, counts the pass against the
+     * refusals left, and returns the refused ids that have sat out their passes and are offered again.
      */
     def passed(known: Set[String]): Set[String] = {
-      val held = refused.get()
-      val kept = held.filter { case (id, _) => known.contains(id) }
+      exhausted.set(exhausted.get().intersect(known))
+      val kept = refused.get().filter { case (id, _) => known.contains(id) }
       val (expired, remaining) = kept.partition { case (_, left) => left <= 1 }
       refused.set(remaining.map { case (id, left) => id -> (left - 1) })
       expired.keySet
@@ -401,12 +494,15 @@ object UpkeepSource {
   /** Boxes a build found already spent, so they stop being offered. */
   private[upkeep] final case class Spent(ids: Set[String])
 
-  /** Boxes whose builds were refused, so they stop being offered until a scan loses them. */
+  /** Boxes whose builds were refused, so they sit out passes before they are offered again. */
   private[upkeep] final case class Refused(ids: Set[String])
 
+  /** Boxes their job says cannot pay, so they are not offered until a scan stops finding them. */
+  private[upkeep] final case class Exhausted(ids: Set[String])
+
   /**
-   * One job's share of a build: what it discovered, which the rule-1 check is made against, and
-   * what is still offered, which is that less the refusals.
+   * One job's share of a build: what it discovered, which the undiscovered-input check is made
+   * against, and what is still offered, which is that less what the memory holds.
    */
   private final case class JobWork(job: UpkeepJob, discovered: Set[String], offered: Set[String])
 
@@ -418,6 +514,8 @@ object UpkeepSource {
     case object NotDue extends Attempt
     /** Due, but not this block: nothing is wrong with the box, the share has no room for it. */
     final case class Deferred(reason: String) extends Attempt
+    /** Due, and the job says the box cannot pay for its successor. */
+    case object Exhausted extends Attempt
     final case class Refused(reason: String) extends Attempt
   }
 }

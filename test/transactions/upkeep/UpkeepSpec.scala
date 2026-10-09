@@ -198,6 +198,24 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     memory.passesLeft(a) shouldBe Some(2)
   }
 
+  /** Cannot pay does not pass with time: no number of passes frees the box, only losing it does. */
+  it should "hold an exhausted box for as long as passes find it, and report it once" in {
+    val memory = new UpkeepSource.Memory(retryAfterScans = 1)
+    val (a, b) = (id("a"), id("b"))
+    memory.refuse(Set(a))
+    memory.exhaust(Set(a, b)) shouldBe Set(a, b)
+    memory.exhaust(Set(a)) shouldBe empty
+    memory.refusedIds shouldBe empty
+    memory.heldIds shouldBe Set(a, b)
+
+    (1 to 3).foreach(_ => memory.passed(Set(a, b)) shouldBe empty)
+    memory.exhaustedIds shouldBe Set(a, b)
+    memory.passed(Set(a)) shouldBe empty
+    memory.exhaustedIds shouldBe Set(a)
+    memory.forget(Set(a))
+    memory.heldIds shouldBe empty
+  }
+
   // ─── config ───────────────────────────────────────────────────────────────
 
   /** As the Lithos maintainers asked: on only when the operator says so, and then job by job. */
@@ -266,6 +284,13 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     val config = UpkeepConfig(Configuration.from(Map("stratum.candidate.sources.upkeep.mode" -> "observe")))
     config.mode shouldBe UpkeepConfig.Observe
     config.observing shouldBe true
+  }
+
+  "verifyWithNode" should "default to on and read off from config" in {
+    UpkeepConfig.Default.verifyWithNode shouldBe true
+    UpkeepConfig(Configuration.empty).verifyWithNode shouldBe true
+    UpkeepConfig(Configuration.from(Map("stratum.candidate.sources.upkeep.verifyWithNode" -> false)))
+      .verifyWithNode shouldBe false
   }
 
   "A job's box list" should "be read from jobs.<name>.boxIds for every job, and leave its flag alone" in {
@@ -366,6 +391,12 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     validated("""stratum.candidate.sources.upkeep.mode = "candidate"""") shouldBe None
     validated("""stratum.candidate.sources.upkeep.mode = "broadcast"""")
       .getOrElse(fail("an unknown mode was accepted")) should include("upkeep.mode")
+  }
+
+  it should "refuse a verifyWithNode that is not true or false" in {
+    validated("stratum.candidate.sources.upkeep.verifyWithNode = false") shouldBe None
+    validated("""stratum.candidate.sources.upkeep.verifyWithNode = "sometimes"""")
+      .getOrElse(fail("a non-boolean verifyWithNode was accepted")) should include("upkeep.verifyWithNode")
   }
 
   it should "refuse a job entry that is not a block" in {

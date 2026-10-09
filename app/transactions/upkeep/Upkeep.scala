@@ -18,10 +18,8 @@ import work.lithos.mutations.InputUTXO
  */
 object Upkeep {
 
-  /** Every upkeep candidate's `kind` starts with this; the job's name follows, so a refusal names it. */
-  final val KindPrefix = "upkeep"
-
-  def kind(job: String): String = s"$KindPrefix:$job"
+  /** An upkeep candidate's `kind`: [[CandidateTx.Upkeep]] and the job's name, so a refusal names the job. */
+  def kind(job: String): String = s"${CandidateTx.Upkeep}:$job"
 
   // ─── sizing ───────────────────────────────────────────────────────────────
 

@@ -56,6 +56,8 @@ final class FakeJob(wallet: NodeWallet, val name: String = "fake") extends Upkee
       case ThrowFor(boxId) if boxId == box.id.toString => throw new IllegalStateException(s"the fake job trips on $boxId")
       case ThrowFor(_) => Some(advance(ctx, Seq(box), height, payTo))
       case SpendAlso(extra) => Some(advance(ctx, Seq(box, extra.toInputUTXO(ctx)), height, payTo))
+      case CannotPayFor(boxId) if boxId == box.id.toString => None
+      case CannotPayFor(_) => throw new IllegalStateException("the fake job cannot sign")
     }
   }
 
@@ -98,7 +100,7 @@ object FakeJob {
    */
   final case class Padded(tipOutputs: Int) extends Behaviour
 
-  /** Say the box cannot be advanced. */
+  /** Say the box cannot be advanced: the box cannot pay for its successor. */
   case object Refuse extends Behaviour
 
   /** Fail inside the build. */
@@ -106,6 +108,9 @@ object FakeJob {
 
   /** Fail inside the build for one box, and advance every other. */
   final case class ThrowFor(boxId: String) extends Behaviour
+
+  /** Say one box cannot be advanced, and fail inside the build for every other. */
+  final case class CannotPayFor(boxId: String) extends Behaviour
 
   /** Build a successor that also spends a box the job never discovered. */
   final case class SpendAlso(extra: NodeBox) extends Behaviour

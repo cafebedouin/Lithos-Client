@@ -2,6 +2,8 @@ package configs
 
 import play.api.{ConfigLoader, Configuration}
 
+import scala.util.{Failure, Success, Try}
+
 /**
  * How this client looks for the boxes its upkeep jobs maintain, and which jobs it runs.
  *
@@ -22,14 +24,20 @@ import play.api.{ConfigLoader, Configuration}
  *                        retries after this many passes rather than never; a box refused again
  *                        sits out as many again.
  * @param jobs            each configured job by name. Absent is off.
- * @param mode            `candidate` offers what is built to the block; `observe` builds, sizes and
- *                        puts each successor through the node's transaction check exactly as it
- *                        would offer it, logs the verdict, and offers nothing. For an operator with
- *                        no block yet, who has no other way to see upkeep do anything real.
+ * @param mode            `candidate` offers what is built to the block; `observe` answers every
+ *                        request empty at once and, in a task of its own, builds, sizes and puts
+ *                        each successor through the node's transaction check, logging the verdict.
+ *                        For an operator with no block yet, who has no other way to see upkeep do
+ *                        anything real.
+ * @param verifyWithNode  in candidate mode, put each admitted successor through the node's
+ *                        transaction check before offering it, and refuse any the node refuses. A
+ *                        package the node rejects loses every inserted transaction with it, so one
+ *                        bad successor would otherwise cost the block the work of every source.
  */
 case class UpkeepConfig(scanIntervalMs: Int, maxBoxesPerJob: Int, retryAfterScans: Int,
                         jobs: Map[String, UpkeepConfig.Job],
-                        mode: String = UpkeepConfig.Candidate) {
+                        mode: String = UpkeepConfig.Candidate,
+                        verifyWithNode: Boolean = true) {
   def jobEnabled(name: String): Boolean = jobs.get(name).exists(_.enabled)
 
   def observing: Boolean = mode == UpkeepConfig.Observe
@@ -75,7 +83,8 @@ object UpkeepConfig {
     maxBoxesPerJob = 256,
     retryAfterScans = 10,
     jobs = Map.empty,
-    mode = Candidate)
+    mode = Candidate,
+    verifyWithNode = true)
 
   def apply(config: Configuration): UpkeepConfig = {
     def int(key: String, fallback: Int): Int =
@@ -94,6 +103,67 @@ object UpkeepConfig {
       maxBoxesPerJob = int("maxBoxesPerJob", Default.maxBoxesPerJob),
       retryAfterScans = int("retryAfterScans", Default.retryAfterScans),
       jobs = jobs,
-      mode = config.getOptional(s"$Path.mode")(ConfigLoader.stringLoader).getOrElse(Default.mode))
+      mode = config.getOptional(s"$Path.mode")(ConfigLoader.stringLoader).getOrElse(Default.mode),
+      verifyWithNode = config.getOptional(s"$Path.verifyWithNode")(ConfigLoader.booleanLoader)
+        .getOrElse(Default.verifyWithNode))
   }
+
+  def validate(v: ConfigValidator, config: Configuration): Unit = {
+    v.range(s"$Path.scanIntervalMs", v.int(s"$Path.scanIntervalMs"), 1000, 3600000, "ms between upkeep discovery passes")
+    val maxBoxesPerJob = v.range(s"$Path.maxBoxesPerJob", v.int(s"$Path.maxBoxesPerJob"), 1, 4096,
+      "box ids one upkeep job may hold between passes").getOrElse(Default.maxBoxesPerJob)
+    v.string(s"$Path.mode").foreach { mode =>
+      if (!Modes.contains(mode)) v.problem(s"$Path.mode", s"must be one of ${Modes.mkString(", ")}")
+    }
+    v.bool(s"$Path.verifyWithNode")
+    v.range(s"$Path.retryAfterScans", v.int(s"$Path.retryAfterScans"), 1, 100000,
+      "discovery passes a refused upkeep box sits out before it is offered again")
+    // Jobs are read generically, so this is the one place a misspelt or unknown job name is caught:
+    // enabled, it would otherwise be maintenance the operator expects and never gets. The keys every
+    // job may carry are checked here for every job; a job's own keys are its factory's to check.
+    Try(config.getOptional(s"$Path.jobs")(ConfigLoader.configurationLoader)) match {
+      case Failure(_) =>
+        v.problem(s"$Path.jobs", "must be a configuration block, one entry per job")
+      case Success(block) => block.foreach { jobs =>
+        val known = transactions.upkeep.UpkeepRegistry.all
+        jobs.subKeys.toSeq.sorted.foreach { name =>
+          val path = s"$Path.jobs.$name"
+          Try(config.getOptional(path)(ConfigLoader.configurationLoader)) match {
+            case Failure(_) | Success(None) =>
+              v.problem(path, "must be a configuration block: enabled, and optionally boxIds")
+            case Success(Some(jobBlock)) =>
+              val key = s"$path.enabled"
+              if (v.bool(key).contains(true) && !known.exists(_.name == name))
+                v.problem(key, s""""$name" is not an upkeep job this client knows. Known: """ +
+                  (if (known.isEmpty) "none" else known.map(_.name).mkString(", ")))
+              boxIds(v, config, s"$path.boxIds", maxBoxesPerJob)
+              known.find(_.name == name).foreach { factory =>
+                Try(factory.check(jobBlock)) match {
+                  case Success(problems) => problems.foreach { case (k, message) => v.problem(s"$path.$k", message) }
+                  case Failure(ex) => v.problem(path, s"could not be checked: ${ex.getMessage}")
+                }
+              }
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * A job's configured box list, read back by id on every scan: a malformed id would fail its read
+   * on every pass, and the list is never cut at `maxBoxesPerJob`, so more ids than that would grow
+   * the job past the bound the operator set.
+   */
+  private def boxIds(v: ConfigValidator, config: Configuration, key: String, maxBoxes: Int): Unit =
+    Try(config.getOptional(key)(ConfigLoader.seqStringLoader)) match {
+      case Failure(_) => v.problem(key, "must be a list of box ids")
+      case Success(ids) => ids.foreach { list =>
+        list.filterNot(_.matches("[0-9a-fA-F]{64}")).foreach(id =>
+          v.problem(key, s""""$id" is not a box id: expected 64 hex characters"""))
+        if (list.map(_.toLowerCase).distinct.size != list.size)
+          v.problem(key, "lists the same box id more than once")
+        if (list.size > maxBoxes)
+          v.problem(key, s"lists ${list.size} boxes; at most $maxBoxes ($Path.maxBoxesPerJob)")
+      }
+    }
 }
