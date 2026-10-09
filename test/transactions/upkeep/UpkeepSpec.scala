@@ -252,6 +252,12 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     pages.get shouldBe Upkeep.MaxMempoolPages
   }
 
+  it should "fail a read still going at its deadline, rather than hold the build" in {
+    val (api, _) = mempoolOf((1 to 250).map(n => waiting(n, Some(10), Some(10L))))
+    Upkeep.demand(api, packageBudget, deadlineMs = System.currentTimeMillis() - 1L).isFailure shouldBe true
+    Upkeep.demand(api, packageBudget, deadlineMs = System.currentTimeMillis() + 60000L) shouldBe Success((2500L, 2500L))
+  }
+
   it should "fail when a later page cannot be read, rather than count the pages before it" in {
     val api = mock[NodeApi]
     when(api.unconfirmedTransactions(any[Paging])).thenAnswer { inv =>
@@ -400,6 +406,15 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       "stratum.candidate.sources.upkeep.opportunisticMaxTxs" -> 7)))
     config.opportunistic shouldBe true
     config.opportunisticMaxTxs shouldBe 7
+  }
+
+  "The order" should "default to rotation, read value from config, and refuse any other" in {
+    UpkeepConfig(Configuration.empty).order shouldBe UpkeepConfig.Rotation
+    UpkeepConfig(Configuration.empty).byValue shouldBe false
+    UpkeepConfig(Configuration.from(Map("stratum.candidate.sources.upkeep.order" -> "value"))).byValue shouldBe true
+    validated("""stratum.candidate.sources.upkeep.order = "value"""") shouldBe None
+    validated("""stratum.candidate.sources.upkeep.order = "tip"""")
+      .getOrElse(fail("an unknown order was accepted")) should include("upkeep.order")
   }
 
   it should "leave the builder's allowance alone when fixed, and widen it to the cap when opportunistic" in {

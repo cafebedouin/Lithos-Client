@@ -77,8 +77,7 @@ object Upkeep {
 
   /**
    * `xs` with the most valuable first. Stable, so boxes worth the same keep the order they came in,
-   * which is the rotation that stops a box deferred at the head from starving the rest. Each worth
-   * is computed once, since it may parse a box.
+   * which is the rotation's order. Each worth is computed once, since it may parse a box.
    */
   def byWorth[A](xs: Seq[A])(worth: A => Worth): Seq[A] = {
     val descending = Ordering.Tuple2(Ordering.Double.reverse, Ordering.Double.reverse)
@@ -182,6 +181,17 @@ object Upkeep {
   /** Transactions per page when the mempool's demand is read. */
   final val MempoolPage = 100
 
+  /** Milliseconds a mempool read may take before it fails and the configured count stands. */
+  final val ReadTimeoutMs = 2000L
+
+  /**
+   * Bytes and cost kept free beside the package for the node's own emission and fee transactions,
+   * which no mempool read counts: the waiting transactions must fit in the rest of the block less
+   * this, or the count does not grow. A reward transaction and a fee transaction are a few hundred
+   * bytes each; this reserve is generous.
+   */
+  final val NodeReserve: CandidateBudget = CandidateBudget(maxBytes = 4096L, maxCost = 200000L)
+
   /**
    * Pages read before the mempool is taken as full. A mempool this deep is not one that leaves a
    * block empty, and reading it all would put the whole mempool on the path of every build.
@@ -192,14 +202,17 @@ object Upkeep {
    * The bytes and cost the transactions waiting in the mempool would claim, read once per build so
    * upkeep can grow only when they fit beside it. Reading stops as soon as the demand reaches
    * `budget` on either dimension, since nothing past that changes the answer, and a mempool deeper
-   * than [[MaxMempoolPages]] pages is charged as `budget` in full. Sums saturate at `budget`, so no
-   * reported figure can wrap them. Every waiting transaction is counted, fee or not, which can only
-   * overstate the demand: overstated, upkeep grows less often; understated, it would take space a
-   * paying transaction wanted. For the same reason a transaction the node reports without a size or
-   * a cost fails the read, as does a page that cannot be read, so the caller falls back to the
-   * configured share rather than act on a guess or on part of the mempool.
+   * fills [[MaxMempoolPages]] pages is charged as `budget` in full. Sums saturate at `budget`, so
+   * no reported figure can wrap them. Every waiting transaction is counted, fee or not, which
+   * overstates the demand: overstated, upkeep grows less often; understated, it would take space a
+   * paying transaction wanted. The read can still understate: offset paging over a mempool that
+   * changes between pages can skip a transaction, and a page shorter than [[MempoolPage]] is taken
+   * as the end. A transaction the node reports without a size or a cost fails the read, as does a
+   * page that cannot be read or a read still going at `deadlineMs` (wall clock), so the caller
+   * falls back to the configured count rather than act on a guess, on part of the mempool, or past
+   * the time a build can spare.
    */
-  def demand(api: NodeApi, budget: CandidateBudget): Try[(Long, Long)] = Try {
+  def demand(api: NodeApi, budget: CandidateBudget, deadlineMs: Long = Long.MaxValue): Try[(Long, Long)] = Try {
     var bytes = 0L
     var cost = 0L
     var paging = Paging(0, MempoolPage)
@@ -220,6 +233,8 @@ object Upkeep {
         ended = page.size < paging.limit
         paging = paging.next
         pages += 1
+        if (!ended && System.currentTimeMillis() > deadlineMs)
+          throw new IllegalStateException(s"the mempool read passed its ${ReadTimeoutMs} ms budget after $pages page(s)")
       }
     }
     (bytes, cost)
@@ -239,14 +254,14 @@ object Upkeep {
 
   /**
    * The source's share in opportunistic mode. The block holds this client's package share and,
-   * beside it, `rest`, which the node fills from the mempool. When the mempool's demand fits in
-   * `rest` with room to spare on both bytes and cost, by the node's figures at the read, the share
-   * keeps its configured bytes and cost and takes up to the larger of the configured count and
-   * `maxTxs` transactions in them; otherwise the configured share stands. A demand that reaches
-   * `rest` exactly does not fit: [[demand]] saturates there, so that figure means "at least this",
-   * and the rest also carries the node's own emission and fee transactions, which no read counts.
-   * The growth is in the count only, so the bytes and cost the operator set bound upkeep as in
-   * fixed mode, and the candidate builder's per-source and package passes stand unchanged.
+   * beside it, `rest`, which the node fills from the mempool, less [[NodeReserve]] for the node's
+   * own transactions. When the mempool's demand fits in `rest` on both bytes and cost, by the
+   * node's figures at the read, the share keeps its configured bytes and cost and takes up to the
+   * larger of the configured count and `maxTxs` (the opportunistic cap) transactions in them;
+   * otherwise the configured share stands. A demand that reaches `rest` exactly does not fit:
+   * [[demand]] saturates there, so that figure means "at least this". The growth is in the count
+   * only, so the bytes and cost the operator set bound upkeep as in fixed mode, and the candidate
+   * builder's per-source and package passes stand unchanged.
    */
   def opportunistic(configured: Share, rest: CandidateBudget, demandBytes: Long, demandCost: Long,
                     maxTxs: Int): Share =

@@ -44,9 +44,10 @@ import scala.util.{Failure, Success, Try}
  * is not remembered. In observe mode a request is answered empty at once and the build runs as a
  * task no request waits for, holding nothing back and forgetting nothing.
  *
- * With `space = opportunistic` the build also reads the mempool once, and the share takes more
- * transactions within its configured bytes and cost when the transactions waiting there fit in the
- * rest of the block beside the package share; see [[Upkeep.opportunistic]].
+ * With `space = opportunistic` the build also reads the mempool once. When the transactions waiting
+ * there fit in the block beside this client's whole package share (`blockShare` of the node's block
+ * limits) and the node's reserve, the count rises to the larger of `maxTxs` and
+ * `opportunisticMaxTxs`; bytes and cost stay as configured. See [[Upkeep.opportunistic]].
  */
 class UpkeepSource(nodeContext: NodeContext,
                    upkeepConfig: UpkeepConfig,
@@ -238,14 +239,13 @@ class UpkeepSource(nodeContext: NodeContext,
    * nothing. A box is sized before it is signed, and building stops at a full share, after
    * [[MaxRefusedPerBuild]] refusals, or after [[MaxDeferredPerBuild]] successors were signed and
    * then found not to fit, so a block whose share is nearly spent does not sign every due box for
-   * nothing. The box at the head of the height rotation (the boxes in id order, started at
-   * `blockHeight` modulo their number) goes first, so every box reaches the head once per cycle and
-   * none waits forever; the rest go in order of what their successors would pay per byte, then per
-   * unit of cost, so the share is spent on the best-paying work first and a full share stops the
-   * build rather than leaving the best box untried, and a lower-paying due box waits for as long as
-   * higher-paying ones are due. Among boxes worth the same the rotation's order is kept. With
-   * `remember` off (observe mode) refusals and exhaustion are logged and not held, so every box
-   * stays watched.
+   * nothing. With `order = rotation` the boxes go in id order (each job's boxes in turn) started at
+   * `blockHeight` modulo their number, as before `order` existed; with `order = value` the due box
+   * unspent the longest goes first, then the rest in order of what their successors would pay per
+   * byte, then per unit of cost, so the share is spent on the best-paying work first and a
+   * lower-paying due box waits while higher-paying due boxes fill the share. Among boxes worth
+   * the same the rotation's order is kept. With `remember` off (observe mode) refusals and
+   * exhaustion are logged and not held, so every box stays watched.
    */
   private def advance(work: Seq[JobWork], blockHeight: Int, remember: Boolean = true): Vector[Upkeep.Prepared] =
     Try(nodeContext.getClient.execute { ctx =>
@@ -266,7 +266,18 @@ class UpkeepSource(nodeContext: NodeContext,
       val bc = BuildContext(ctx, blockHeight,
         CandidateCapital.collectionContract(nodeContext.getNodeWallet, useTrueProp))
       val configured = Upkeep.Share.of(limits.maxTxs, limits.budget)
-      val start = if (upkeepConfig.opportunistic) opportunisticShare(bc, configured, blockHeight) else configured
+      // Parsed once, here, because the order and the read gate need the box as much as building
+      // does; each job's configured ids plus up to maxBoxesPerJob others, each a small parse.
+      val ordered = work.flatMap(item => item.offered.toSeq.sorted.flatMap(byId.get)
+        .map(box => (item, box, Try(box.toInputUTXO(ctx)))))
+      val inTurn = rotated(ordered, blockHeight)
+      def isDue(entry: (JobWork, NodeBox, Try[InputUTXO])): Boolean =
+        entry._3.toOption.exists(input => Try(entry._1.job.due(input, bc.height)).getOrElse(false))
+      val dueNow = inTurn.filter(isDue)
+      // The mempool is read only when the extra count could be used: more due boxes than slots.
+      val start =
+        if (upkeepConfig.opportunistic && dueNow.size > configured.slots) opportunisticShare(bc, configured, blockHeight)
+        else configured
       val startBudget = CandidateBudget(start.bytes, start.cost)
       var share = start
       var refused = Set.empty[String]
@@ -274,13 +285,14 @@ class UpkeepSource(nodeContext: NodeContext,
       var due = 0
       var deferred = 0
       var signedForNothing = 0
-      // Parsed once, here, because ranking needs the box as much as building does; at most
-      // maxBoxesPerJob boxes per job, each a small parse.
-      val ordered = work.flatMap(item => item.offered.toSeq.sorted.flatMap(byId.get)
-        .map(box => (item, box, Try(box.toInputUTXO(ctx)))))
-      val inTurn = rotated(ordered, blockHeight)
-      val queue = (inTurn.take(1) ++ Upkeep.byWorth(inTurn.drop(1)) { case (item, _, parsed) =>
-        worth(bc, item.job, parsed)
+      // By value: the due box unspent the longest goes first (a waiting box keeps its id and its
+      // creation height, so this is a bound on how long any due box waits, however the set
+      // changes), then the rest by what their successors would pay. Otherwise the plain rotation.
+      val queue = (if (!upkeepConfig.byValue) inTurn else {
+        val first = if (dueNow.isEmpty) Seq.empty else Seq(dueNow.minBy(_._2.creationHeight))
+        first ++ Upkeep.byWorth(inTurn.filterNot(first.contains)) { case (item, _, parsed) =>
+          worth(bc, item.job, parsed)
+        }
       }).iterator
       while (!share.full && refused.size < MaxRefusedPerBuild && signedForNothing < MaxDeferredPerBuild &&
         queue.hasNext) {
@@ -370,10 +382,10 @@ class UpkeepSource(nodeContext: NodeContext,
    */
   private def opportunisticShare(bc: BuildContext, configured: Upkeep.Share, blockHeight: Int): Upkeep.Share = {
     val block = CandidateBudget(bc.params.getMaxBlockSize.toLong, bc.params.getMaxBlockCost.toLong)
-    val pkg = CandidateBudget.of(block.maxBytes, block.maxCost, blockShare)
-    val rest = block.less(pkg.maxBytes, pkg.maxCost)
+    val pkg = CandidateBudget.of(block.maxBytes, block.maxCost, math.min(1.0, math.max(0.0, blockShare)))
+    val rest = block.less(pkg.maxBytes + Upkeep.NodeReserve.maxBytes, pkg.maxCost + Upkeep.NodeReserve.maxCost)
     if (rest.maxBytes <= 0L || rest.maxCost <= 0L) configured
-    else Upkeep.demand(nodeApi, rest) match {
+    else Upkeep.demand(nodeApi, rest, System.currentTimeMillis() + Upkeep.ReadTimeoutMs) match {
       case Failure(ex) =>
         logger.warn(s"Upkeep could not read the mempool at $blockHeight, keeping the configured share: ${ex.getMessage}")
         configured

@@ -48,14 +48,15 @@ trait UpkeepJob {
   def due(box: InputUTXO, height: Int): Boolean
 
   /**
-   * What advancing `box` would pay this miner, in nanoERG, before anything is built: the source puts
-   * the due boxes that pay the most per byte first, so a share that runs out runs out on the work
-   * worth least to the block. It must be what [[plan]] would actually pay, computed the same way
-   * from the box and `bc` (the floors, the box's value), never a figure the box merely declares:
-   * anyone can create a box at a public script, and a stated tip the box cannot pay would otherwise
-   * buy it the first slot for nothing. 0 for a beat that would be free. Pure and cheap, because it
-   * is asked of every offered box every block. A job that cannot say returns 0 and its boxes go
-   * after every paying one.
+   * What advancing `box` would pay this miner, in nanoERG, before anything is built. With
+   * `order = value` the source builds the due box unspent the longest first, then the rest in order
+   * of this figure per floor byte, then per unit of floor cost, so a share that runs out runs out
+   * on the work worth least. It must be what [[build]] would actually pay, computed the same way
+   * from the box and `bc`, and never more than the box can pay, whatever the box declares: anyone
+   * can create a box at a public script, and a payment the box cannot make would otherwise buy it
+   * an early slot for nothing. Return 0 when advancing the box pays nothing. Asked of every offered
+   * box in every build, so keep it pure and cheap. With the default of 0, the job's boxes go after
+   * every paying box of any job, in rotation order.
    */
   def expectedRevenue(box: InputUTXO, bc: BuildContext): Long = 0L
 

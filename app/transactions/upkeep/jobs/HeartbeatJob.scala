@@ -54,7 +54,8 @@ final class HeartbeatJob(boxIds: Seq[String], minTip: Long = HeartbeatJob.Defaul
   /**
    * What a beat of `box` would pay, worked out exactly as [[plan]] works it out: the tip, or what
    * the box can spare above its successor's floor, or nothing when that is too small for a box of
-   * its own or below `minTip`. Never the R6 figure as declared, which anyone can write.
+   * its own or below `minTip`, and nothing for a box below its successor's floor or whose registers
+   * are not a beat. Never more than the box can pay, whatever R6 declares.
    */
   override def expectedRevenue(box: InputUTXO, bc: BuildContext): Long =
     Beat.of(box).map(beat => terms(box, beat, bc)).collect { case Terms.Paying(paid) => paid }.getOrElse(0L)

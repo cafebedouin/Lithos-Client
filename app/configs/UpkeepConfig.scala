@@ -49,13 +49,21 @@ import scala.util.{Failure, Success, Try}
  * @param opportunisticMaxTxs the most successors an opportunistic share admits however empty the
  *                        block, so a runaway job cannot fill one; the configured count wins if it
  *                        is larger.
+ * @param order           `rotation` builds due boxes in id order started at the block height, as
+ *                        before this setting existed; `value` builds the due box unspent the
+ *                        longest first, then the rest by what their successors would pay per byte.
+ *                        Rotation by default, so an operator already running a job sees no new
+ *                        order without asking for it.
  */
 case class UpkeepConfig(scanIntervalMs: Int, maxBoxesPerJob: Int, retryAfterScans: Int,
                         jobs: Map[String, UpkeepConfig.Job],
                         mode: String,
                         verifyWithNode: Boolean,
                         space: String,
-                        opportunisticMaxTxs: Int) {
+                        opportunisticMaxTxs: Int,
+                        order: String) {
+
+  def byValue: Boolean = order == UpkeepConfig.Value
   def jobEnabled(name: String): Boolean = jobs.get(name).exists(_.enabled)
 
   def observing: Boolean = mode == UpkeepConfig.Observe
@@ -68,7 +76,9 @@ case class UpkeepConfig(scanIntervalMs: Int, maxBoxesPerJob: Int, retryAfterScan
    * know of would be cut back to the configured one there. Opportunistic, the count may reach the
    * larger of `maxTxs` and [[opportunisticMaxTxs]]; the bytes and cost stay as configured, so the
    * builder's bounds on them stand. The package-wide count, the sum of every source's `maxTxs`, rises
-   * with it. Fixed, the limits are returned unchanged. A configured `maxTxs` of 0 is the builder's
+   * with it, and the widened count applies to every block: in opportunistic mode the builder no
+   * longer holds upkeep to `maxTxs`, only the source's own mempool check does. Fixed, the limits are
+   * returned unchanged. A configured `maxTxs` of 0 is the builder's
    * sign never to ask the source, so it is kept too.
    */
   def allowance(limits: CandidateSourceConfig): CandidateSourceConfig =
@@ -109,6 +119,14 @@ object UpkeepConfig {
 
   final val Spaces: Seq[String] = Seq(Fixed, Opportunistic)
 
+  /** Due boxes in id order started at the block height: the default, and the order before `order` existed. */
+  final val Rotation = "rotation"
+
+  /** The due box unspent the longest first, then the rest by expected revenue per byte, then per cost. */
+  final val Value = "value"
+
+  final val Orders: Seq[String] = Seq(Rotation, Value)
+
   /**
    * One job's block under `jobs.<name>`: the keys every job may carry, read here once for all of
    * them, and the block itself for the keys only that job's factory knows.
@@ -144,7 +162,8 @@ object UpkeepConfig {
     mode = Candidate,
     verifyWithNode = true,
     space = Fixed,
-    opportunisticMaxTxs = 20)
+    opportunisticMaxTxs = 20,
+    order = Rotation)
 
   def apply(config: Configuration): UpkeepConfig = {
     def int(key: String, fallback: Int): Int =
@@ -167,7 +186,8 @@ object UpkeepConfig {
       verifyWithNode = config.getOptional(s"$Path.verifyWithNode")(ConfigLoader.booleanLoader)
         .getOrElse(Default.verifyWithNode),
       space = config.getOptional(s"$Path.space")(ConfigLoader.stringLoader).getOrElse(Default.space),
-      opportunisticMaxTxs = int("opportunisticMaxTxs", Default.opportunisticMaxTxs))
+      opportunisticMaxTxs = int("opportunisticMaxTxs", Default.opportunisticMaxTxs),
+      order = config.getOptional(s"$Path.order")(ConfigLoader.stringLoader).getOrElse(Default.order))
   }
 
   def validate(v: ConfigValidator, config: Configuration, jobChecks: Seq[UpkeepConfig.JobCheck]): Unit = {
@@ -180,6 +200,9 @@ object UpkeepConfig {
     v.bool(s"$Path.verifyWithNode")
     v.string(s"$Path.space").foreach { space =>
       if (!Spaces.contains(space)) v.problem(s"$Path.space", s"must be one of ${Spaces.mkString(", ")}")
+    }
+    v.string(s"$Path.order").foreach { order =>
+      if (!Orders.contains(order)) v.problem(s"$Path.order", s"must be one of ${Orders.mkString(", ")}")
     }
     // The same ceiling as any source's maxTxs: past it the cap no longer stops a runaway job.
     v.range(s"$Path.opportunisticMaxTxs", v.int(s"$Path.opportunisticMaxTxs"), 1, 100,
