@@ -3,7 +3,7 @@ package transactions.upkeep
 import node.MutationConversions._
 import node.NodeApi
 import node.model._
-import org.ergoplatform.appkit.{BlockchainContext, ErgoValue, Parameters}
+import org.ergoplatform.appkit.{BlockchainContext, ErgoValue, NetworkType, Parameters}
 import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito.{never, verify, when}
 import org.scalatest.flatspec.AnyFlatSpec
@@ -13,7 +13,8 @@ import support.{CanonicalNodeBox, FakeNodeContext}
 import transactions.engine.execution.RollupExecution
 import transactions.upkeep.jobs.HeartbeatJob
 import transactions.upkeep.jobs.HeartbeatJob.Beat
-import work.lithos.mutations.{Contract, InputUTXO}
+import sigma.ast.ErgoTree
+import work.lithos.mutations.{Contract, InputUTXO, UTXO}
 
 import scala.collection.JavaConverters._
 import scala.util.Success
@@ -68,6 +69,19 @@ class HeartbeatJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       CanonicalNodeBox(id(seed), id(seed), value, 0, lastBeat, tree, assets,
         NodeRegisters(regs.zipWithIndex.map { case (v, i) => s"R${i + 4}" -> v.toHex }.toMap))
     }
+  }
+
+  // ─── the tree ─────────────────────────────────────────────────────────────
+
+  "The pinned tree" should "be what DueJob.ergo compiles to, on every network" in {
+    HeartbeatJob.compile(NetworkType.MAINNET).ergoTreeHex shouldBe HeartbeatJob.TreeHex
+    HeartbeatJob.compile(NetworkType.TESTNET).ergoTreeHex shouldBe HeartbeatJob.TreeHex
+  }
+
+  it should "be the tree discovery compares against, whatever the network" in {
+    HeartbeatJob.contract(NetworkType.MAINNET).ergoTreeHex shouldBe HeartbeatJob.TreeHex
+    HeartbeatJob.contract(NetworkType.TESTNET).ergoTreeHex shouldBe HeartbeatJob.TreeHex
+    new Fixture().tree shouldBe HeartbeatJob.TreeHex
   }
 
   // ─── discovery ────────────────────────────────────────────────────────────
@@ -189,14 +203,49 @@ class HeartbeatJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     }
   }
 
-  it should "build nothing for a box that can no longer pay its beat" in {
+  /**
+   * The least the successor of a box worth `value` may keep at `height`, sized the way the job sizes
+   * it: the box recreated at its full value with R4 at the height.
+   */
+  private def floorOf(f: Fixture, value: Long, height: Int, bc: BuildContext): Long =
+    ScriptJob.minimumValue(UTXO(Contract(ErgoTree.fromHex(f.tree)), value, Seq.empty,
+      Seq(ErgoValue.of(height), ErgoValue.of(period), ErgoValue.of(tip))).setCreationHeight(height), bc)
+
+  it should "pay only what the box can spare above its successor's floor" in {
     val f = new Fixture()
     f.client.execute { ctx =>
       val height = ctx.getHeight + 1
-      // The successor would keep 1000 nanoERG, under the consensus minimum for any box.
-      val box = f.dueBox("a", lastBeat = height - period, value = tip + 1000L)
+      val bc = BuildContext(ctx, height, f.wallet.contract)
+      // Sized at a value with as many VLQ bytes as the box's, so the floor is the box's own.
+      val floor = floorOf(f, 1000000L, height, bc)
+      val spare = tip / 2
+      val box = f.dueBox("a", lastBeat = height - period, value = floor + spare)
+      floorOf(f, box.value, height, bc) shouldBe floor
+
+      val built = f.job.build(box.toInputUTXO(ctx), bc).getOrElse(fail("the job built nothing"))
+      built.tx.getOutputsToSpend.size shouldBe 2
+      successorOf(built).value shouldBe floor
+      Beat.of(successorOf(built)) shouldBe Some(Beat(height, period, tip))
+      built.tx.getOutputsToSpend.get(1).getValue shouldBe spare
+      built.capital.map(_.value) shouldBe Seq(spare)
+    }
+  }
+
+  it should "beat for free when what the box can spare is too small for a box of its own" in {
+    val f = new Fixture()
+    f.client.execute { ctx =>
+      val height = ctx.getHeight + 1
+      val bc = BuildContext(ctx, height, f.wallet.contract)
+      val floor = floorOf(f, 1000000L, height, bc)
+      val box = f.dueBox("a", lastBeat = height - period, value = floor + 1000L)
+      floorOf(f, box.value, height, bc) shouldBe floor
       f.job.due(box.toInputUTXO(ctx), height) shouldBe true
-      f.job.build(box.toInputUTXO(ctx), BuildContext(ctx, height, f.wallet.contract)) shouldBe None
+
+      val built = f.job.build(box.toInputUTXO(ctx), bc).getOrElse(fail("the job built nothing"))
+      built.tx.getOutputsToSpend.size shouldBe 1
+      successorOf(built).value shouldBe box.value
+      Beat.of(successorOf(built)) shouldBe Some(Beat(height, period, tip))
+      built.capital shouldBe empty
     }
   }
 
