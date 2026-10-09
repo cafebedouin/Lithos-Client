@@ -6,6 +6,9 @@ import org.ergoplatform.appkit.{BlockchainParameters, Parameters}
 import org.ergoplatform.sdk.ErgoId
 import org.ergoplatform.wallet.boxes.ErgoBoxAssetExtractor
 import org.ergoplatform.wallet.interpreter.ErgoInterpreter
+import node.NodeApi
+import node.model.{NodeTransaction, Paging}
+import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito.when
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -174,6 +177,81 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     Upkeep.byWorth(Seq.empty[String])(worths) shouldBe empty
   }
 
+  // ─── space ────────────────────────────────────────────────────────────────
+
+  private val configuredShare = Upkeep.Share(slots = 5, bytes = 1000L, cost = 10000L)
+  private val packageBudget = CandidateBudget(maxBytes = 100000L, maxCost = 1000000L)
+
+  "An opportunistic share" should "keep the configured share when the mempool's demand is over the package budget" in {
+    Upkeep.opportunistic(configuredShare, packageBudget, 200000L, 2000000L, maxTxs = 20) shouldBe configuredShare
+    Upkeep.opportunistic(configuredShare, packageBudget, 99500L, 0L, maxTxs = 20) shouldBe configuredShare
+    Upkeep.opportunistic(configuredShare, packageBudget, 0L, 995000L, maxTxs = 20) shouldBe configuredShare
+  }
+
+  it should "grow to what an empty mempool leaves of the package, and no further than the cap allows" in {
+    Upkeep.opportunistic(configuredShare, packageBudget, 0L, 0L, maxTxs = 20) shouldBe
+      Upkeep.Share(slots = 20, bytes = 100000L, cost = 1000000L)
+    Upkeep.opportunistic(configuredShare, packageBudget, 40000L, 300000L, maxTxs = 20) shouldBe
+      Upkeep.Share(slots = 20, bytes = 60000L, cost = 700000L)
+  }
+
+  it should "never take fewer slots than configured, whatever the cap" in {
+    Upkeep.opportunistic(configuredShare, packageBudget, 0L, 0L, maxTxs = 2).slots shouldBe 5
+  }
+
+  /** Block limits at a round cost per byte: ten units of cost to the byte. */
+  private val blockParams: BlockchainParameters = {
+    val p = mock[BlockchainParameters]
+    when(p.getMaxBlockSize).thenReturn(100000)
+    when(p.getMaxBlockCost).thenReturn(1000000)
+    p
+  }
+
+  private def waiting(n: Int, size: Option[Int], cost: Option[Long]): NodeTransaction =
+    NodeTransaction(id(s"pending$n"), Seq.empty, Seq.empty, Seq.empty, size, cost)
+
+  /** A node whose mempool is `txs`, served a page at a time, counting the pages it is asked for. */
+  private def mempoolOf(txs: Seq[NodeTransaction]): (NodeApi, java.util.concurrent.atomic.AtomicInteger) = {
+    val api = mock[NodeApi]
+    val pages = new java.util.concurrent.atomic.AtomicInteger(0)
+    when(api.unconfirmedTransactions(any[Paging])).thenAnswer { inv =>
+      val paging = inv.getArgument[Paging](0)
+      pages.incrementAndGet()
+      Success(txs.slice(paging.offset, paging.offset + paging.limit))
+    }
+    (api, pages)
+  }
+
+  "The mempool's demand" should "add up what the node reports for every waiting transaction" in {
+    val (api, pages) = mempoolOf((1 to 150).map(n => waiting(n, Some(100), Some(2000L))))
+    Upkeep.demand(api, packageBudget, blockParams) shouldBe Success((15000L, 300000L))
+    pages.get shouldBe 2
+  }
+
+  it should "charge a transaction with no reported cost at the block's cost per byte" in {
+    Upkeep.weight(waiting(1, Some(300), None), blockParams) shouldBe ((300L, 3000L))
+  }
+
+  it should "stop reading once the demand reaches the budget" in {
+    val (api, pages) = mempoolOf((1 to 1000).map(n => waiting(n, Some(1000), Some(1L))))
+    val demanded = Upkeep.demand(api, packageBudget, blockParams).get
+    demanded._1 should be >= packageBudget.maxBytes
+    pages.get shouldBe 1
+  }
+
+  it should "charge a mempool deeper than it reads as the whole budget" in {
+    val (api, pages) = mempoolOf((1 to (Upkeep.MaxMempoolPages + 1) * Upkeep.MempoolPage)
+      .map(n => waiting(n, Some(1), Some(1L))))
+    Upkeep.demand(api, packageBudget, blockParams) shouldBe Success((packageBudget.maxBytes, packageBudget.maxCost))
+    pages.get shouldBe Upkeep.MaxMempoolPages
+  }
+
+  it should "fail when a page cannot be read, rather than count part of the mempool" in {
+    val api = mock[NodeApi]
+    when(api.unconfirmedTransactions(any[Paging])).thenReturn(Failure(new RuntimeException("node down")))
+    Upkeep.demand(api, packageBudget, blockParams).isFailure shouldBe true
+  }
+
   "A successor's kind" should "name its job, so a refused block says which one built it" in {
     Upkeep.kind("heartbeat") shouldBe "upkeep:heartbeat"
   }
@@ -303,6 +381,28 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     config.observing shouldBe true
   }
 
+  "The space" should "default to fixed and read opportunistic and its cap from config" in {
+    UpkeepConfig.Default.space shouldBe UpkeepConfig.Fixed
+    UpkeepConfig(Configuration.empty).opportunistic shouldBe false
+    UpkeepConfig(Configuration.empty).opportunisticMaxTxs shouldBe 20
+    val config = UpkeepConfig(Configuration.from(Map(
+      "stratum.candidate.sources.upkeep.space" -> "opportunistic",
+      "stratum.candidate.sources.upkeep.opportunisticMaxTxs" -> 7)))
+    config.opportunistic shouldBe true
+    config.opportunisticMaxTxs shouldBe 7
+  }
+
+  it should "leave the builder's allowance alone when fixed, and widen it to the cap when opportunistic" in {
+    val limits = CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 5)
+    UpkeepConfig.Default.allowance(limits) shouldBe limits
+    val widened = UpkeepConfig.Default.copy(space = UpkeepConfig.Opportunistic, opportunisticMaxTxs = 12).allowance(limits)
+    widened shouldBe limits.copy(maxTxs = 12, maxBytes = Long.MaxValue, maxCost = Long.MaxValue)
+    UpkeepConfig.Default.copy(space = UpkeepConfig.Opportunistic, opportunisticMaxTxs = 2)
+      .allowance(limits).maxTxs shouldBe 5
+    UpkeepConfig.Default.copy(space = UpkeepConfig.Opportunistic).allowance(limits.copy(maxTxs = 0)) shouldBe
+      limits.copy(maxTxs = 0)
+  }
+
   "verifyWithNode" should "default to on and read off from config" in {
     UpkeepConfig.Default.verifyWithNode shouldBe true
     UpkeepConfig(Configuration.empty).verifyWithNode shouldBe true
@@ -408,6 +508,15 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     validated("""stratum.candidate.sources.upkeep.mode = "candidate"""") shouldBe None
     validated("""stratum.candidate.sources.upkeep.mode = "broadcast"""")
       .getOrElse(fail("an unknown mode was accepted")) should include("upkeep.mode")
+  }
+
+  it should "accept the two spaces and refuse any other, and hold the cap to its range" in {
+    validated("""stratum.candidate.sources.upkeep.space = "opportunistic"""") shouldBe None
+    validated("""stratum.candidate.sources.upkeep.space = "fixed"""") shouldBe None
+    validated("""stratum.candidate.sources.upkeep.space = "greedy"""")
+      .getOrElse(fail("an unknown space was accepted")) should include("upkeep.space")
+    validated("stratum.candidate.sources.upkeep.opportunisticMaxTxs = 0")
+      .getOrElse(fail("a cap of zero was accepted")) should include("opportunisticMaxTxs")
   }
 
   it should "refuse a verifyWithNode that is not true or false" in {

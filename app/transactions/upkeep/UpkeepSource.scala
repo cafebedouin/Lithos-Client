@@ -7,7 +7,7 @@ import node.NodeApi
 import node.model.NodeBox
 import org.slf4j.{Logger, LoggerFactory}
 import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
-import transactions.candidate.{CandidateBundle, CandidateCapital}
+import transactions.candidate.{CandidateBudget, CandidateBundle, CandidateCapital}
 import work.lithos.mutations.InputUTXO
 
 import java.util.concurrent.atomic.AtomicReference
@@ -24,14 +24,19 @@ import scala.util.{Failure, Success, Try}
  * only check that matters: a box that does not come back is spent. The build closes over values it
  * is handed and reports back by message, so no actor field is read off the mailbox.
  *
- * Never extractive. Nothing here reads pending transactions, so nothing reorders or front-runs
- * anyone, and a job's transaction may only spend the boxes that job discovered.
+ * Never extractive. Nothing here reads what pending transactions do (opportunistic mode counts
+ * their bytes and cost, nothing more), so nothing reorders or front-runs anyone, and a job's
+ * transaction may only spend the boxes that job discovered.
  *
  * Holds outlive the actor in a [[UpkeepSource.Memory]], so a restart does not offer the node the
  * same transaction again. With `verifyWithNode`, each admitted successor goes through the node's
  * transaction check in the build `PrepareBlockTxs` starts, off the request path, and the node
  * evaluates it at the next block's height, the candidate's own. In observe mode a request is
  * answered empty at once and the build runs as a task no request waits for.
+ *
+ * With `space = opportunistic` the build also reads the mempool once, and the share grows into
+ * what the package share (`blockShare` of the node's block limits) would leave empty after the
+ * transactions waiting there; see [[Upkeep.opportunistic]].
  */
 class UpkeepSource(nodeContext: NodeContext,
                    upkeepConfig: UpkeepConfig,
@@ -39,7 +44,8 @@ class UpkeepSource(nodeContext: NodeContext,
                    jobs: Seq[UpkeepJob],
                    memory: UpkeepSource.Memory,
                    useTrueProp: Boolean,
-                   firstScanDelay: FiniteDuration = UpkeepSource.FirstScanDelay) extends Actor {
+                   firstScanDelay: FiniteDuration = UpkeepSource.FirstScanDelay,
+                   blockShare: Double = CandidateBudget.DefaultShare) extends Actor {
 
   import UpkeepSource._
 
@@ -73,7 +79,8 @@ class UpkeepSource(nodeContext: NodeContext,
     logger.info(s"UpkeepSource started: mode=${upkeepConfig.mode}, verifyWithNode=${upkeepConfig.verifyWithNode}, " +
       s"jobs=${jobs.map(_.name).mkString(", ")}, scanIntervalMs=${upkeepConfig.scanIntervalMs}, " +
       s"maxBoxesPerJob=${upkeepConfig.maxBoxesPerJob}, retryAfterScans=${memory.retryAfterScans}, " +
-      s"share: txs=${limits.maxTxs}, bytes=${limits.maxBytes}, cost=${limits.maxCost}; " +
+      s"share: txs=${limits.maxTxs}, bytes=${limits.maxBytes}, cost=${limits.maxCost}, space=${upkeepConfig.space}" +
+      (if (upkeepConfig.opportunistic) s" (up to ${upkeepConfig.opportunisticMaxTxs} txs), blockShare=$blockShare" else "") + "; " +
       s"refusedHeld=${memory.refusedIds.size}, exhaustedHeld=${memory.exhaustedIds.size}")
     ticker = Some(context.system.scheduler.scheduleWithFixedDelay(
       firstScanDelay, upkeepConfig.scanIntervalMs.milliseconds, self, ScanTick)(context.dispatcher))
@@ -216,7 +223,10 @@ class UpkeepSource(nodeContext: NodeContext,
       // Read once for the block: every job builds against the same parameters, height and payTo.
       val bc = BuildContext(ctx, blockHeight,
         CandidateCapital.collectionContract(nodeContext.getNodeWallet, useTrueProp))
-      var share = Upkeep.Share.of(limits.maxTxs, limits.budget)
+      val configured = Upkeep.Share.of(limits.maxTxs, limits.budget)
+      val start = if (upkeepConfig.opportunistic) opportunisticShare(bc, configured, blockHeight) else configured
+      val startBudget = CandidateBudget(start.bytes, start.cost)
+      var share = start
       var refused = Set.empty[String]
       var exhausted = Set.empty[String]
       var due = 0
@@ -261,8 +271,9 @@ class UpkeepSource(nodeContext: NodeContext,
           (if (deferred > 0) s", $deferred left for a later block" else "") +
           (if (share.full && queue.hasNext) ", share full before every box was tried" else "") +
           s": ${chosen.map(_.label).mkString(", ")}; share used " +
-          s"txs=${chosen.size}/${limits.maxTxs}, bytes=${share.usedBytes(limits.budget)}/${limits.maxBytes}, " +
-          s"cost=${share.usedCost(limits.budget)}/${limits.maxCost}")
+          s"txs=${chosen.size}/${start.slots}, bytes=${share.usedBytes(startBudget)}/${start.bytes}, " +
+          s"cost=${share.usedCost(startBudget)}/${start.cost}" +
+          (if (start != configured) " (opportunistic)" else ""))
       chosen
     }) match {
       case Success(chosen) => chosen
@@ -290,6 +301,26 @@ class UpkeepSource(nodeContext: NodeContext,
     if (chosen.nonEmpty) logger.info(s"Upkeep offers ${accepted.size} of ${chosen.size} successors at $blockHeight " +
       s"after the node's check: ${accepted.map(_.label).mkString(", ")}")
     accepted
+  }
+
+  /**
+   * The share for one block in opportunistic mode: the configured one, or the space the mempool's
+   * demand leaves of the package share when that is larger. The package share is worked out as the
+   * candidate builder works it, from the node's parameters for this block and `blockShare`. A
+   * mempool that cannot be read leaves the configured share, which is what fixed mode takes anyway.
+   */
+  private def opportunisticShare(bc: BuildContext, configured: Upkeep.Share, blockHeight: Int): Upkeep.Share = {
+    val pkg = CandidateBudget.of(bc.params.getMaxBlockSize.toLong, bc.params.getMaxBlockCost.toLong, blockShare)
+    Upkeep.demand(nodeApi, pkg, bc.params) match {
+      case Failure(ex) =>
+        logger.warn(s"Upkeep could not read the mempool at $blockHeight, keeping the configured share: ${ex.getMessage}")
+        configured
+      case Success((bytes, cost)) =>
+        val share = Upkeep.opportunistic(configured, pkg, bytes, cost, upkeepConfig.opportunisticMaxTxs)
+        logger.debug(s"Upkeep at $blockHeight: the mempool claims ${bytes}B and $cost cost of the package's " +
+          s"${pkg.maxBytes}B and ${pkg.maxCost} cost; share txs=${share.slots}, bytes=${share.bytes}, cost=${share.cost}")
+        share
+    }
   }
 
   /**
