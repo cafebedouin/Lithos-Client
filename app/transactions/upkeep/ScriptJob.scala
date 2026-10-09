@@ -38,15 +38,18 @@ final case class Successor(outputs: Seq[UTXO],
  * first. Everything around the rule is written once here rather than in every job:
  *
  *  - Discovery. On an indexed node, the first [[ScriptJob.MaxPages]] pages of [[ScriptJob.PageSize]]
- *    confirmed boxes at the script in the index's ascending order (1,000 boxes), then lowest
- *    [[priority]] first among those. Boxes beyond that window are not seen on that pass, so a
- *    script anyone may pay into can be crowded by older boxes whatever their due height; the
+ *    confirmed boxes at the script, newest first (1,000 boxes), then lowest [[priority]] first among
+ *    those. Newest first, because a beat gives a box a new id at the newest end: a box that is kept
+ *    alive stays in the window, and crowding it out takes a stream of newer boxes rather than a
+ *    thousand old ones made once. Boxes beyond that window are not seen on that pass; the
  *    configured list below is how an operator makes sure particular boxes are seen, until their
  *    next beat gives them new ids.
  *    On every node, indexed or not, the ids under `jobs.<name>.boxIds`, each read from the UTXO set
  *    with one `boxById` call, so an unconfirmed box is never spent without its parent. That list is
- *    not a fallback: its boxes come first and are never cut. A box is kept only if it sits at the
- *    script, the job [[maintains]] it, and EIP-27 does not block it.
+ *    not a fallback: its boxes come first and are never cut. A node error reading any listed id
+ *    fails the job's whole pass, and the source keeps the last one; a listed id the UTXO set no
+ *    longer holds (spent, typically by a beat) is dropped without a log line. A box is kept only if
+ *    it sits at the script, the job [[maintains]] it, and EIP-27 does not block it.
  *  - Assembly: the box as the only input, the plan's data inputs, no fee, outputs spending the box
  *    to the nanoERG.
  *  - Signing with a prover that holds no secret. The preHeader carries only the height, so a script
@@ -148,8 +151,9 @@ object ScriptJob {
   /**
    * The plan assembled and signed: `box` the only input, no fee, the block's height in the
    * preHeader, an empty proof from a prover with no secret, and the revenue declared as capital.
-   * A plan with an output at the fee proposition, or revenue at anything but `bc.payTo`, is
-   * refused here, so a job cannot pay a fee or send this miner's revenue elsewhere.
+   * Every output must sit at the box's own script or at `bc.payTo`, revenue at `bc.payTo` only, and
+   * none at the fee proposition: refused here, so a script job cannot pay a fee or send value, this
+   * miner's revenue included, anywhere else.
    */
   private def signed(job: String, box: InputUTXO, successor: Successor, bc: BuildContext): UpkeepJob.Built = {
     require(successor.revenue.forall(i => i >= 0 && i < successor.outputs.size),
@@ -159,6 +163,9 @@ object ScriptJob {
       s"$job's plan has an output at the fee proposition; block transactions pay no fee")
     require(successor.revenue.forall(i => successor.outputs(i).contract.ergoTreeHex == bc.payTo.ergoTreeHex),
       s"$job's plan declares revenue at an output that is not this miner's collection contract")
+    require(successor.outputs.forall(o => o.contract.ergoTreeHex == box.contract.ergoTreeHex ||
+      o.contract.ergoTreeHex == bc.payTo.ergoTreeHex),
+      s"$job's plan has an output at neither the box's own script nor this miner's collection contract")
     val spent = successor.outputs.map(_.value).sum
     require(spent == box.value,
       s"$job's plan spends $spent of the box's ${box.value} nanoERG; it must spend all of it")
@@ -185,7 +192,7 @@ object ScriptJob {
     var pages = 0
     var exhausted = false
     while (!exhausted && pages < MaxPages) {
-      val page = api.unspentBoxesByErgoTree(tree, paging, SortDirection.Asc, MempoolOptions.ConfirmedOnly) match {
+      val page = api.unspentBoxesByErgoTree(tree, paging, SortDirection.Desc, MempoolOptions.ConfirmedOnly) match {
         case Success(boxes) => boxes
         case Failure(ex) =>
           throw new IllegalStateException(s"the node index could not list $job boxes (page $pages): ${ex.getMessage}", ex)

@@ -7,7 +7,7 @@ import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.{NetworkType, Parameters}
 import org.ergoplatform.appkit.impl.SignedTransactionImpl
 import org.mockito.ArgumentMatchers.any
-import org.mockito.Mockito.{never, times, verify, when}
+import org.mockito.Mockito.{atLeastOnce, never, times, verify, when}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
@@ -126,6 +126,9 @@ class ScriptJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
 
     f.discover() shouldBe boxes.map(_.boxId)
     f.pages.get shouldBe 2
+    // newest first, so a box a beat just renewed stays in the window
+    verify(f.api, atLeastOnce()).unspentBoxesByErgoTree(any[String], any[Paging],
+      org.mockito.ArgumentMatchers.eq(SortDirection.Desc), any[MempoolOptions])
   }
 
   it should "stop after the most pages one pass reads" in {
@@ -299,6 +302,16 @@ class ScriptJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       val thrown = the[IllegalArgumentException] thrownBy
         f.job.build(f.scriptBox("a").toInputUTXO(ctx), BuildContext(ctx, ctx.getHeight + 1, f.wallet.contract))
       thrown.getMessage should include("collection")
+    }
+  }
+
+  it should "throw on a plan with an output at neither the box's script nor the collection contract" in {
+    val f = new Fixture()
+    f.client.execute { ctx =>
+      f.job.extraTo = Some(f.wallet.contract)
+      val thrown = the[IllegalArgumentException] thrownBy
+        f.job.build(f.scriptBox("a").toInputUTXO(ctx), BuildContext(ctx, ctx.getHeight + 1, Contract.SIGMA_TRUE))
+      thrown.getMessage should include("neither")
     }
   }
 

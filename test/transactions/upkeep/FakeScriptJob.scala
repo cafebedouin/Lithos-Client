@@ -39,6 +39,9 @@ final class FakeScriptJob(boxIds: Seq[String] = Seq.empty, val name: String = "s
   /** Add an output at the fee proposition, which [[ScriptJob]] must refuse. */
   @volatile var feeOutput: Long = 0L
 
+  /** Add an output at this contract, neither the box's nor `payTo`, which [[ScriptJob]] must refuse. */
+  @volatile var extraTo: Option[Contract] = None
+
   /** Each box's priority by id; zero, the default, for any other. */
   @volatile var priorities: Map[String, Long] = Map.empty
 
@@ -55,8 +58,10 @@ final class FakeScriptJob(boxIds: Seq[String] = Seq.empty, val name: String = "s
     else Some(Successor(
       outputs = Seq(
         UTXO(box.contract, box.value - Tip, box.tokens, box.registers).setCreationHeight(bc.height),
-        UTXO(tipTo.getOrElse(bc.payTo), Tip - leftOver - feeOutput).setCreationHeight(bc.height)) ++
-        (if (feeOutput > 0L) Seq(UTXO(Contract.FEE, feeOutput).setCreationHeight(bc.height)) else Seq.empty),
+        UTXO(tipTo.getOrElse(bc.payTo), Tip - leftOver - feeOutput - extraTo.map(_ => Tip / 2).getOrElse(0L))
+          .setCreationHeight(bc.height)) ++
+        (if (feeOutput > 0L) Seq(UTXO(Contract.FEE, feeOutput).setCreationHeight(bc.height)) else Seq.empty) ++
+        extraTo.map(c => UTXO(c, Tip / 2).setCreationHeight(bc.height)).toSeq,
       dataInputs = dataInputs,
       revenue = revenue))
 }

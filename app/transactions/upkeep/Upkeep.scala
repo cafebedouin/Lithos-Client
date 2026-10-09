@@ -87,10 +87,11 @@ object Upkeep {
     RollupExecution.signedInputIds(signed) -- discovered
 
   /**
-   * The inputs a job signed that sit at one of this wallet's keys: `treeOf` is the script of every
-   * box the build read back, by id, and `wallet` the P2PK trees the prover can sign for. Empty for
-   * an acceptable transaction: whatever a job reports, no upkeep transaction spends the operator's
-   * ERG. An input the build did not read back is caught by [[undiscoveredInputs]].
+   * The inputs a job signed that sit at one of this wallet's keys, among the boxes this build read
+   * back: `treeOf` is the script of every box read back, by id, and `wallet` the trees of the
+   * wallet's keys (its P2PK trees and its miner-reward trees). The build refuses any input it did
+   * not read back before asking this, so together the two checks cover every input: whatever a job
+   * reports, no upkeep transaction spends the operator's ERG.
    */
   def walletInputs(signed: SignedTransaction, treeOf: Map[String, String], wallet: Set[String]): Set[String] =
     RollupExecution.signedInputIds(signed).filter(id => treeOf.get(id).exists(wallet.contains))

@@ -41,7 +41,7 @@ deployment it finds no collateral box and never builds a Lithos block. Two small
 are what let the source be tested end to end on a devnet rather than on mainnet:
 
 - `node.deployment.file`: a JSON descriptor of a deployment (the token ids, the genesis dictionary box, the
-  protocol box ids) that `Deployment.install` reads at startup in place of the network's constants. Empty by
+  protocol box ids) that `DeploymentConfig.install` reads and validates at startup, in place of the network's constants. Empty by
   default; refused on mainnet unless `allowOnMainnet = true`; a descriptor that does not parse, names a
   malformed id, or names another network stops the client with the key at fault.
 - `tools.DeployProtocol`: a deployer that mints the eight protocol tokens, creates the emission, config, fraud
@@ -51,8 +51,9 @@ are what let the source be tested end to end on a devnet rather than on mainnet:
 A spec pins every protocol contract's tree on mainnet and testnet (`test/resources/deployment/contract-pins.txt`)
 so that neither piece can move a mainnet tree unnoticed; the pins were recorded from the base commit's own
 compiler and this branch matches them. A second spec checks that an override reaches the thirteen contracts that
-compile an id in and leaves `payout` and the other network unchanged. Reaching any mainnet id compiles nothing: the
-one address mainnet has no constant for is pinned too.
+compile an id in and leaves `payout` and the other network's `collateral` unchanged. Reading any mainnet id never
+requires compiling a contract: the one address mainnet has no constant for is pinned and checked against the compiled
+script.
 
 ## Why
 
@@ -85,9 +86,10 @@ second bundle as a conflicting spend.
   built the bad one. That is a client-wide gap. This PR narrows it for upkeep with `verifyWithNode` (on by
   default), which puts every successor through the node's `/transactions/check` before it is offered, but it
   does not close it.
-- By-script discovery reads at most the 1,000 oldest boxes at a job's script per pass and keeps the soonest
-  due of those, up to `maxBoxesPerJob`. Anyone can create boxes at a public script, so 1,000 older boxes
-  there, due or not, hide every newer one from an indexed client, and a beat gives a real box a newer index.
+- By-script discovery reads at most the 1,000 newest boxes at a job's script per pass and keeps the soonest
+  due of those, up to `maxBoxesPerJob`. Newest first because a beat gives a box a new id at the newest end, so a
+  box kept alive stays in the window; anyone can still crowd it out with a stream of newer boxes at a public
+  script, at a minimum box each per pass.
   Configured `boxIds` are never cut (at most 256 per job, each a read on every scan), but on a plain node
   they go stale after each beat, since the successor has a new id and a plain node cannot follow a spend.
 - A refresh at the same height is answered from what was prepared: a successor is a fixed function of its box
@@ -95,6 +97,11 @@ second bundle as a conflicting spend.
   read-back is up to 16 node calls of 256 boxes, in the build that starts when the height is known.
 - With `useTruePropCollection`, the tip output is anyone-can-spend until the holding top-up in the same
   package takes it, as the rent source's capital is.
+- A package the node rejects is reported to the sources only as a dropped height, so a successor the node's
+  check accepted and block validation refused is rebuilt next block; with `verifyWithNode` off that repeats.
+  Client-wide, as for the rent source.
+- With `minTip = 0`, anyone can create due-job boxes that pay nothing and claim upkeep's share of every block at
+  the cost of one minimum box each; the default declines them.
 
 ## Follow-ups, not in this PR
 

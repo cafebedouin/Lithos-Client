@@ -111,11 +111,14 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
         val ergoDexSource = batcherSource(configs.CandidateSourceConfig.ErgoDex, ergoDexBatcher)
 
         // Upkeep: keyless maintenance of other protocols' boxes, off by default and never spending
-        // this wallet. No actor exists unless the source is enabled and config turns on a job.
+        // this wallet. No actor exists unless the source is enabled with a count, config turns on a
+        // job, and the stratum builds block transactions at all, so nothing scans a node for a source
+        // that is never asked.
         val upkeepLimits = limitsFor(configs.CandidateSourceConfig.Upkeep)
         val upkeepConfig = configs.UpkeepConfig(config)
         val upkeepJobs =
-          if (upkeepLimits.enabled) transactions.upkeep.UpkeepRegistry.enabled(upkeepConfig)
+          if (upkeepLimits.enabled && upkeepLimits.maxTxs > 0 && stratumParams.candidate.blockTransactions)
+            transactions.upkeep.UpkeepRegistry.enabled(upkeepConfig)
           else Seq.empty[transactions.upkeep.UpkeepJob]
         val upkeepSource = if (!transactions.upkeep.UpkeepSource.runs(upkeepLimits, upkeepJobs)) None else {
           // Built here rather than inside the actor, so every incarnation after a restart shares it

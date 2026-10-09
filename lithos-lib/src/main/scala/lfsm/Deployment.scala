@@ -87,7 +87,8 @@ object DeploymentIds {
    *
    * Mainnet has no FP control address constant in [[LFSMHelpers]]: the box lives under
    * `FP_Control_Mainnet`, which takes no constants. Its address is pinned here as a constant, so that
-   * reaching any mainnet id compiles nothing; `DeployPlanSpec` holds the compiled script to it.
+   * reading any mainnet id never requires compiling a contract; `DeployPlanSpec` holds the compiled
+   * script to it.
    */
   final val FpControlMainnetAddress: String =
     "GPp4BycDwAwoCGQnA3QC1UQyqNuB2UxG6KMiRFioBqwo1kAUaqKwQZL1RQ8nZz1jN4EmYt6XVuWUXMzxiXja5FwxiUmCcxHGfrNjeSbVroaxrnKqHMqKwsgzMUAz5yMErBNW8x84n3c9BzcF"

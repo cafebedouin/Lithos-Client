@@ -15,10 +15,10 @@
   // (its other inputs are unconstrained): two boxes with the same terms cannot share one successor
   // while the spender keeps the second whole. The period must
   // be positive and the tip not negative, or the box never advances. Whatever the successor does not
-  // keep, which is at most the tip, belongs to the executor, and where it goes is not constrained.
+  // keep, which is at most the tip, is unconstrained: whoever builds the spend directs it.
   // The fresh creation height is what makes a beat reset the storage-rent clock: a successor stamped
   // with an old height would be as close to rent as the box it replaced. Because R4 and the creation
-  // height must both equal HEIGHT, a beat transaction is valid in exactly one block and can never be
+  // height must both equal HEIGHT, a beat transaction is valid at exactly one height and can never be
   // included later; and a late beat moves the schedule, since the next due height counts from the
   // beat, not from when the box was due.
 
@@ -42,7 +42,9 @@
   // Only OUTPUTS(0)'s script, tokens, R4 to R6, creation height and value are constrained. Its R7 to
   // R9, every other output, the other inputs and the data inputs are free: an executor may attach
   // registers to the successor, raising its minimum value (a later beat may drop them, as the
-  // reference job does, or keep them), and may put the tip anywhere, including a fee.
+  // reference job does, or keep them), and may put the tip anywhere, including a fee. The standing
+  // box's own R4 is not checked either: a creator's R4 above the current height delays the first
+  // beat until R4 + R5. `onlyOne` binds only boxes at this exact tree.
 
   // ASSUMPTIONS
   // None. The contract takes no compile-time constants; it reads SELF, OUTPUTS(0) and INPUTS(0)'s

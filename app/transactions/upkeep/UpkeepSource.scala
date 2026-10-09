@@ -33,10 +33,12 @@ import scala.util.{Failure, Success, Try}
  *
  * Holds outlive the actor in a [[UpkeepSource.Memory]], so a restart does not offer the node the
  * same transaction again. With `verifyWithNode`, each admitted successor goes through the node's
- * transaction check in the build `PrepareBlockTxs` starts, off the request path; the node
- * evaluates it at its own next height, normally the candidate's but later when blocks come fast,
- * and a refusal for that reason is not remembered. In observe mode a request is answered empty at
- * once and the build runs as a task no request waits for, holding nothing back.
+ * transaction check in the build for that height: normally the one `PrepareBlockTxs` starts, off
+ * the request path, but a request that finds nothing prepared starts the build and waits on it,
+ * checks included, inside the shared source deadline. The node evaluates the check at its own next
+ * height, normally the candidate's but later when blocks come fast, and a refusal for that reason
+ * is not remembered. In observe mode a request is answered empty at once and the build runs as a
+ * task no request waits for, holding nothing back and forgetting nothing.
  */
 class UpkeepSource(nodeContext: NodeContext,
                    upkeepConfig: UpkeepConfig,
@@ -236,7 +238,7 @@ class UpkeepSource(nodeContext: NodeContext,
       val byId = live.map(box => box.boxId -> box).toMap
       val treeOf = byId.map { case (id, box) => id -> box.ergoTree }
       val gone = ids.toSet -- byId.keySet
-      if (gone.nonEmpty) self ! Spent(gone)
+      if (remember && gone.nonEmpty) self ! Spent(gone)
 
       // Read once for the block: every job builds against the same parameters, height and payTo.
       val bc = BuildContext(ctx, blockHeight,
@@ -362,18 +364,23 @@ class UpkeepSource(nodeContext: NodeContext,
   /**
    * The job's successor for one due box, sized, or why there is none: [[Attempt.Exhausted]] when
    * the job says the box cannot pay, [[Attempt.Refused]] when the build throws, spends a box the
-   * job never discovered, or spends a box at one of this wallet's keys.
+   * job never discovered or this build did not read back, or spends a box at one of this wallet's
+   * keys (its P2PK trees and its miner-reward trees).
    */
   private def build(bc: BuildContext, item: JobWork, input: InputUTXO,
                     treeOf: Map[String, String]): Either[Attempt, Upkeep.Prepared] =
     Try(item.job.build(input, bc)).flatMap[Either[Attempt, Upkeep.Prepared]] {
       case None => Success(Left(Attempt.Exhausted))
       case Some(built) => Try {
-        val foreign = Upkeep.undiscoveredInputs(built.tx, item.discovered)
-        val ours = Upkeep.walletInputs(built.tx, treeOf, nodeContext.getNodeWallet.signableTrees)
+        // Every input must be a box this build read back: discovered, live, and of a known script.
+        // A discovered box held back from this build was not read back, so it does not pass either.
+        val foreign = Upkeep.undiscoveredInputs(built.tx, item.discovered) ++
+          (transactions.engine.execution.RollupExecution.signedInputIds(built.tx) -- treeOf.keySet)
+        val wallet = nodeContext.getNodeWallet
+        val ours = Upkeep.walletInputs(built.tx, treeOf, wallet.signableTrees ++ wallet.rewardTrees.keySet)
         if (foreign.nonEmpty)
-          Left(Attempt.Refused(s"its successor spends ${foreign.size} box(es) the job never discovered: " +
-            foreign.mkString(", ")))
+          Left(Attempt.Refused(s"its successor spends ${foreign.size} box(es) the job never discovered or this " +
+            s"build did not read back: ${foreign.mkString(", ")}"))
         else if (ours.nonEmpty)
           Left(Attempt.Refused(s"its successor spends ${ours.size} box(es) at this wallet's keys: " +
             ours.mkString(", ")))
