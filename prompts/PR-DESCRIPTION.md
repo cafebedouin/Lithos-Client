@@ -25,7 +25,8 @@ transaction; the successor keeps the script, tokens and terms, is stamped with t
 most the tip leaves). Its tree is pinned in `HeartbeatJob.TreeHex`, and a spec holds the compiled script to
 it on mainnet and testnet. It pays what the box can spare, up to the tip, to the miner's collection output
 as capital the holding top-up aggregates, and beats for free when that is too small for a box of its own.
-No due-job box exists on mainnet yet.
+No due-job box exists on mainnet yet. Lithos itself has mined about 30 mainnet blocks so far (heights 1,888,828 to
+1,890,575, about 1.7% of blocks over that span), so upkeep carried only in Lithos blocks waits about 60 blocks today.
 
 ## Why
 
