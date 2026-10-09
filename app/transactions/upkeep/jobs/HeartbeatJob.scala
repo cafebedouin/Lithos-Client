@@ -2,7 +2,7 @@ package transactions.upkeep.jobs
 
 import lfsm.contracts.UpkeepContracts
 import org.ergoplatform.appkit.{ErgoValue, NetworkType}
-import transactions.upkeep.{BuildContext, ScriptJob, Successor}
+import transactions.upkeep.{BuildContext, JobFactory, ScriptJob, Successor}
 import work.lithos.mutations.{Contract, InputUTXO, UTXO}
 
 /**
@@ -69,6 +69,9 @@ final class HeartbeatJob(boxIds: Seq[String]) extends ScriptJob(boxIds) {
 object HeartbeatJob {
 
   final val Name = "heartbeat"
+
+  /** Made from the keys every job carries: the heartbeat has none of its own. */
+  val Factory: JobFactory = JobFactory(Name, job => new HeartbeatJob(job.boxIds))
 
   private val compiled = new ScriptJob.PerNetwork(nt => UpkeepContracts.mkDueJobContract(nt))
 

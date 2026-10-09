@@ -1,7 +1,27 @@
 package transactions.upkeep
 
 import configs.UpkeepConfig
+import play.api.Configuration
 import transactions.upkeep.jobs.HeartbeatJob
+
+/**
+ * How a registered job is made from its config block.
+ *
+ * A function rather than a job value because a job may have settings of its own, and a factory
+ * rather than a case class per job under `configs` so that a new job's settings are that job's
+ * file and nothing else. The keys every job may carry, `enabled` and `boxIds`, are read and
+ * validated by the framework before the factory sees them; everything else in the block is the
+ * factory's to read and, through `check`, to validate.
+ *
+ * @param name  the key under `stratum.candidate.sources.upkeep.jobs`, and the name of the job made
+ * @param make  the job, from its block as config states it
+ * @param check problems with the job's own keys, as (key relative to the block, what is wrong), so
+ *              a mistake in them stops startup with every other config problem rather than
+ *              surfacing as a job that throws on its first build
+ */
+final case class JobFactory(name: String,
+                            make: UpkeepConfig.Job => UpkeepJob,
+                            check: Configuration => Seq[(String, String)] = _ => Seq.empty)
 
 /**
  * Every upkeep job this client knows, in the order their work is offered to a block.
@@ -9,23 +29,26 @@ import transactions.upkeep.jobs.HeartbeatJob
  * A job is registered here and nowhere else: config can only turn a registered job on, so an
  * operator cannot be made to run maintenance that was never reviewed, and a name in config that
  * matches nothing is reported at startup rather than silently never run.
- *
- * Jobs are built from config rather than held as values because one of them has settings of its
- * own; [[names]] is the same list without a config, for validation, which runs before any config
- * object exists and only needs to know what a name may be.
  */
 object UpkeepRegistry {
 
+  val all: Seq[JobFactory] = Seq(HeartbeatJob.Factory)
+
   /** The names [[all]] answers to, in the same order. Validation checks config against this. */
-  val names: Seq[String] = Seq(HeartbeatJob.Name)
+  def names: Seq[String] = all.map(_.name)
 
-  def all(config: UpkeepConfig): Seq[UpkeepJob] = Seq(new HeartbeatJob(config.heartbeat.boxIds))
-
-  def byName(config: UpkeepConfig, name: String): Option[UpkeepJob] = all(config).find(_.name == name)
-
-  /** The jobs config turns on, out of `jobs`. Off is the default for every one of them. */
-  def enabled(config: UpkeepConfig, jobs: Seq[UpkeepJob]): Seq[UpkeepJob] =
-    jobs.filter(job => config.jobEnabled(job.name))
-
-  def enabled(config: UpkeepConfig): Seq[UpkeepJob] = enabled(config, all(config))
+  /**
+   * The jobs config turns on, made from their blocks, out of `factories`. Off is the default for
+   * every one of them. A factory whose job answers to another name is a registry mistake, and is
+   * refused here rather than left to report its candidates and refusals under the wrong name.
+   */
+  def enabled(config: UpkeepConfig, factories: Seq[JobFactory] = all): Seq[UpkeepJob] =
+    factories.flatMap { factory =>
+      config.jobs.get(factory.name).filter(_.enabled).map { settings =>
+        val job = factory.make(settings)
+        require(job.name == factory.name,
+          s"upkeep factory ${factory.name} made a job named ${job.name}")
+        job
+      }
+    }
 }

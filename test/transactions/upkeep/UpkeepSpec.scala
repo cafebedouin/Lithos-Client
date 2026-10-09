@@ -1,14 +1,17 @@
 package transactions.upkeep
 
-import configs.{CandidateConfig, CandidateSourceConfig, HeartbeatConfig, UpkeepConfig}
+import com.typesafe.config.ConfigFactory
+import configs.{CandidateConfig, CandidateSourceConfig, ConfigValidationException, Configs, UpkeepConfig}
 import org.ergoplatform.appkit.BlockchainParameters
 import org.mockito.Mockito.when
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
-import play.api.Configuration
+import play.api.{ConfigLoader, Configuration}
 import transactions.candidate.BlockTxMessages.CandidateTx
 import transactions.candidate.CandidateBudget
+
+import scala.util.{Failure, Success, Try}
 
 /**
  * The pure half: what the node charges a shape, how many successors a share affords, what the
@@ -166,18 +169,24 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
   }
 
   "The registry" should "know the heartbeat job, under the name validation checks config against" in {
-    UpkeepRegistry.all(UpkeepConfig.Default).map(_.name) shouldBe UpkeepRegistry.names
     UpkeepRegistry.names shouldBe Seq("heartbeat")
-    UpkeepRegistry.byName(UpkeepConfig.Default, "heartbeat").map(_.name) shouldBe Some("heartbeat")
-    UpkeepRegistry.byName(UpkeepConfig.Default, "dexy") shouldBe None
+    UpkeepRegistry.all.map(_.name) shouldBe UpkeepRegistry.names
+    UpkeepRegistry.all.foreach(factory => factory.make(UpkeepConfig.Job()).name shouldBe factory.name)
   }
 
   it should "turn the heartbeat on from config alone" in {
-    val on = UpkeepConfig.Default.copy(jobs = Map("heartbeat" -> true))
+    val on = UpkeepConfig.Default.copy(jobs = Map("heartbeat" -> UpkeepConfig.Job(enabled = true)))
     UpkeepRegistry.enabled(on).map(_.name) shouldBe Seq("heartbeat")
   }
 
-  "Job flags" should "be read generically from jobs.<name>.enabled" in {
+  it should "refuse a factory whose job answers to another name" in {
+    val (_, _, wallet) = support.FakeNodeContext(mock[node.NodeApi], numAddresses = 1)
+    val misnamed = JobFactory("one", _ => new FakeJob(wallet, "other"))
+    val config = UpkeepConfig.Default.copy(jobs = Map("one" -> UpkeepConfig.Job(enabled = true)))
+    an[IllegalArgumentException] should be thrownBy UpkeepRegistry.enabled(config, Seq(misnamed))
+  }
+
+  "Job blocks" should "be read generically from jobs.<name>" in {
     val config = UpkeepConfig(Configuration.from(Map(
       "stratum.candidate.sources.upkeep.scanIntervalMs" -> 5000,
       "stratum.candidate.sources.upkeep.retryAfterScans" -> 3,
@@ -187,7 +196,7 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     config.scanIntervalMs shouldBe 5000
     config.maxBoxesPerJob shouldBe UpkeepConfig.Default.maxBoxesPerJob
     config.retryAfterScans shouldBe 3
-    config.jobs shouldBe Map("heartbeat" -> true, "dexy" -> false)
+    config.jobs.map { case (name, job) => name -> job.enabled } shouldBe Map("heartbeat" -> true, "dexy" -> false)
     config.jobEnabled("heartbeat") shouldBe true
     config.jobEnabled("dexy") shouldBe false
     config.jobEnabled("never-mentioned") shouldBe false
@@ -197,9 +206,11 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     val (_, _, wallet) = support.FakeNodeContext(mock[node.NodeApi], numAddresses = 1)
     val on = new FakeJob(wallet, "on")
     val off = new FakeJob(wallet, "off")
-    val config = UpkeepConfig.Default.copy(jobs = Map("on" -> true, "off" -> false))
+    val factories = Seq(JobFactory("off", _ => off), JobFactory("on", _ => on))
+    val config = UpkeepConfig.Default.copy(jobs = Map(
+      "on" -> UpkeepConfig.Job(enabled = true), "off" -> UpkeepConfig.Job(enabled = false)))
 
-    UpkeepRegistry.enabled(config, Seq(off, on)).map(_.name) shouldBe Seq("on")
+    UpkeepRegistry.enabled(config, factories).map(_.name) shouldBe Seq("on")
     UpkeepRegistry.enabled(config, Seq.empty) shouldBe empty
   }
 
@@ -207,14 +218,103 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     val config = UpkeepConfig(Configuration.from(Map("stratum.candidate.sources.upkeep.enabled" -> true)))
     config.jobs shouldBe empty
     config.retryAfterScans shouldBe UpkeepConfig.Default.retryAfterScans
-    config.heartbeat shouldBe HeartbeatConfig.Default
   }
 
-  "The heartbeat's box list" should "be read from jobs.heartbeat.boxIds, and leave the job's flag alone" in {
+  "A job's box list" should "be read from jobs.<name>.boxIds for every job, and leave its flag alone" in {
     val ids = Seq("ab" * 32, "cd" * 32)
     val config = UpkeepConfig(Configuration.from(Map(
-      "stratum.candidate.sources.upkeep.jobs.heartbeat.boxIds" -> ids)))
-    config.heartbeat.boxIds shouldBe ids
+      "stratum.candidate.sources.upkeep.jobs.heartbeat.boxIds" -> ids,
+      "stratum.candidate.sources.upkeep.jobs.dexy.boxIds" -> ids.take(1))))
+    config.jobs("heartbeat").boxIds shouldBe ids
+    config.jobs("dexy").boxIds shouldBe ids.take(1)
     config.jobEnabled("heartbeat") shouldBe false
+  }
+
+  /** A job with a key of its own, which only its factory knows how to read. */
+  private final class Keyed(val limit: Int) extends UpkeepJob {
+    override val name: String = "keyed"
+    override def discover(ctx: org.ergoplatform.appkit.BlockchainContext, api: node.NodeApi, height: Int): Seq[String] = Seq.empty
+    override def due(box: work.lithos.mutations.InputUTXO, height: Int): Boolean = false
+    override def build(box: work.lithos.mutations.InputUTXO, bc: BuildContext): Option[UpkeepJob.Built] = None
+  }
+
+  private val keyedFactory = JobFactory("keyed",
+    job => new Keyed(job.block.getOptional("limit")(ConfigLoader.intLoader).getOrElse(7)),
+    block => Try(block.getOptional("limit")(ConfigLoader.intLoader)).toOption.flatten match {
+      case Some(limit) if limit <= 0 => Seq("limit" -> s"$limit is not positive")
+      case _ => Seq.empty
+    })
+
+  "A factory" should "read its own key from its job's block, and the framework the generic ones" in {
+    def made(entries: (String, Any)*): Keyed = {
+      val config = UpkeepConfig(Configuration.from(
+        entries.map { case (k, v) => s"stratum.candidate.sources.upkeep.jobs.keyed.$k" -> v }.toMap))
+      UpkeepRegistry.enabled(config, Seq(keyedFactory)) match {
+        case Seq(job: Keyed) => job
+        case other => fail(s"expected the keyed job, made $other")
+      }
+    }
+    made("enabled" -> true, "limit" -> 3).limit shouldBe 3
+    made("enabled" -> true).limit shouldBe 7
+    UpkeepRegistry.enabled(UpkeepConfig(Configuration.from(Map(
+      "stratum.candidate.sources.upkeep.jobs.keyed.limit" -> 3))), Seq(keyedFactory)) shouldBe empty
+  }
+
+  it should "report a problem with its own key under the job's path" in {
+    keyedFactory.check(Configuration.from(Map("limit" -> 0))) shouldBe Seq("limit" -> "0 is not positive")
+    keyedFactory.check(Configuration.from(Map("limit" -> 3))) shouldBe empty
+  }
+
+  // ─── validation ───────────────────────────────────────────────────────────
+
+  private def shipped: Configuration =
+    Configuration(ConfigFactory.parseResources("application.conf").resolve())
+
+  private def validated(hocon: String): Option[String] = {
+    val config = Configuration(ConfigFactory.parseString(hocon).withFallback(shipped.underlying).resolve())
+    Try(Configs.validateAll(config)) match {
+      case Failure(ex: ConfigValidationException) => Some(ex.getMessage)
+      case Failure(ex) => throw ex
+      case Success(_) => None
+    }
+  }
+
+  "Validation" should "accept the shipped upkeep block" in {
+    validated("") shouldBe None
+  }
+
+  it should "refuse an enabled job the registry does not know, and not a disabled one" in {
+    validated("stratum.candidate.sources.upkeep.jobs.dexy.enabled = true")
+      .getOrElse(fail("an unknown enabled job was accepted")) should include("jobs.dexy.enabled")
+    validated("stratum.candidate.sources.upkeep.jobs.dexy.enabled = false") shouldBe None
+  }
+
+  /** The list is generic, so a job the client does not run yet is held to it too. */
+  it should "check boxIds for every job that lists them" in {
+    val good = "ab" * 32
+    Seq("heartbeat", "dexy").foreach { job =>
+      val key = s"stratum.candidate.sources.upkeep.jobs.$job.boxIds"
+      validated(s"""$key = ["$good"]""") shouldBe None
+      validated(s"""$key = ["$good", "${good.toUpperCase}"]""")
+        .getOrElse(fail(s"$job: a repeated id was accepted")) should include("more than once")
+      validated(s"""$key = ["abc"]""")
+        .getOrElse(fail(s"$job: a short id was accepted")) should include(key)
+      validated(s"""$key = "$good"""")
+        .getOrElse(fail(s"$job: a bare string was accepted")) should include("list of box ids")
+    }
+  }
+
+  it should "hold boxIds to the configured maxBoxesPerJob" in {
+    val ids = (1 to 3).map(i => f"$i%064x").map(id => s""""$id"""").mkString("[", ", ", "]")
+    validated(s"""stratum.candidate.sources.upkeep.maxBoxesPerJob = 3
+                 |stratum.candidate.sources.upkeep.jobs.heartbeat.boxIds = $ids""".stripMargin) shouldBe None
+    validated(s"""stratum.candidate.sources.upkeep.maxBoxesPerJob = 2
+                 |stratum.candidate.sources.upkeep.jobs.heartbeat.boxIds = $ids""".stripMargin)
+      .getOrElse(fail("three ids were accepted for a cap of two")) should include("at most 2")
+  }
+
+  it should "refuse a job entry that is not a block" in {
+    validated("stratum.candidate.sources.upkeep.jobs.heartbeat = true")
+      .getOrElse(fail("a bare flag was accepted")) should include("must be a configuration block")
   }
 }

@@ -37,6 +37,24 @@ object Configs {
   def fail(key: String, problem: String): Nothing =
     throw new ConfigValidationException(Seq(ConfigProblem(key, problem)))
 
+  /**
+   * An upkeep job's fallback box list, which is read back by id on every scan: a malformed id would
+   * fail the whole read, and with it every box in the list, on every pass, and more ids than the job
+   * may hold would be cut at the first scan without the operator knowing which were dropped.
+   */
+  private def upkeepBoxIds(v: ConfigValidator, config: Configuration, key: String, maxBoxes: Int): Unit =
+    Try(config.getOptional(key)(ConfigLoader.seqStringLoader)) match {
+      case Failure(_) => v.problem(key, "must be a list of box ids")
+      case Success(ids) => ids.foreach { list =>
+        list.filterNot(_.matches("[0-9a-fA-F]{64}")).foreach(id =>
+          v.problem(key, s""""$id" is not a box id: expected 64 hex characters"""))
+        if (list.map(_.toLowerCase).distinct.size != list.size)
+          v.problem(key, "lists the same box id more than once")
+        if (list.size > maxBoxes)
+          v.problem(key, s"lists ${list.size} boxes; at most $maxBoxes (stratum.candidate.sources.upkeep.maxBoxesPerJob)")
+      }
+    }
+
   def validateAll(config: Configuration): Unit = {
     val v = new ConfigValidator(config)
     v.bool("stats.enabled")
@@ -204,39 +222,39 @@ object Configs {
       v.int("stratum.candidate.sources.rent.blocksPerScan"), 1, 10000, "blocks read per scan pass")
     v.range("stratum.candidate.sources.upkeep.scanIntervalMs",
       v.int("stratum.candidate.sources.upkeep.scanIntervalMs"), 1000, 3600000, "ms between upkeep discovery passes")
-    v.range("stratum.candidate.sources.upkeep.maxBoxesPerJob",
+    val maxBoxesPerJob = v.range("stratum.candidate.sources.upkeep.maxBoxesPerJob",
       v.int("stratum.candidate.sources.upkeep.maxBoxesPerJob"), 1, 4096,
-      "box ids one upkeep job may hold between passes")
+      "box ids one upkeep job may hold between passes").getOrElse(UpkeepConfig.Default.maxBoxesPerJob)
     v.range("stratum.candidate.sources.upkeep.retryAfterScans",
       v.int("stratum.candidate.sources.upkeep.retryAfterScans"), 1, 100000,
       "discovery passes a refused upkeep box sits out before it is offered again")
     // Jobs are read generically, so this is the one place a misspelt or unknown job name is caught:
-    // enabled, it would otherwise be maintenance the operator expects and never gets.
+    // enabled, it would otherwise be maintenance the operator expects and never gets. The keys every
+    // job may carry are checked here for every job; a job's own keys are its factory's to check.
     Try(config.getOptional("stratum.candidate.sources.upkeep.jobs")(ConfigLoader.configurationLoader)) match {
       case Failure(_) =>
         v.problem("stratum.candidate.sources.upkeep.jobs", "must be a configuration block, one entry per job")
       case Success(block) => block.foreach { jobs =>
-        val known = transactions.upkeep.UpkeepRegistry.names
+        val known = transactions.upkeep.UpkeepRegistry.all
         jobs.subKeys.toSeq.sorted.foreach { name =>
-          val key = s"stratum.candidate.sources.upkeep.jobs.$name.enabled"
-          if (v.bool(key).contains(true) && !known.contains(name))
-            v.problem(key, s""""$name" is not an upkeep job this client knows. Known: """ +
-              (if (known.isEmpty) "none" else known.mkString(", ")))
+          val path = s"stratum.candidate.sources.upkeep.jobs.$name"
+          Try(config.getOptional(path)(ConfigLoader.configurationLoader)) match {
+            case Failure(_) | Success(None) =>
+              v.problem(path, "must be a configuration block: enabled, and optionally boxIds")
+            case Success(Some(jobBlock)) =>
+              val key = s"$path.enabled"
+              if (v.bool(key).contains(true) && !known.exists(_.name == name))
+                v.problem(key, s""""$name" is not an upkeep job this client knows. Known: """ +
+                  (if (known.isEmpty) "none" else known.map(_.name).mkString(", ")))
+              upkeepBoxIds(v, config, s"$path.boxIds", maxBoxesPerJob)
+              known.find(_.name == name).foreach { factory =>
+                Try(factory.check(jobBlock)) match {
+                  case Success(problems) => problems.foreach { case (k, message) => v.problem(s"$path.$k", message) }
+                  case Failure(ex) => v.problem(path, s"could not be checked: ${ex.getMessage}")
+                }
+              }
+          }
         }
-      }
-    }
-    // The heartbeat's fallback list is read back by id on every scan, so a malformed id would fail
-    // the whole read, and with it every box in the list, on every pass.
-    val heartbeatIds = s"${HeartbeatConfig.Path}.boxIds"
-    Try(config.getOptional(heartbeatIds)(ConfigLoader.seqStringLoader)) match {
-      case Failure(_) => v.problem(heartbeatIds, "must be a list of box ids")
-      case Success(ids) => ids.foreach { list =>
-        list.filterNot(_.matches("[0-9a-fA-F]{64}")).foreach(id =>
-          v.problem(heartbeatIds, s""""$id" is not a box id: expected 64 hex characters"""))
-        if (list.map(_.toLowerCase).distinct.size != list.size)
-          v.problem(heartbeatIds, "lists the same box id more than once")
-        if (list.size > UpkeepConfig.Default.maxBoxesPerJob)
-          v.problem(heartbeatIds, s"lists ${list.size} boxes; at most ${UpkeepConfig.Default.maxBoxesPerJob}")
       }
     }
     v.bool("stratum.candidate.useTruePropCollection")

@@ -5,9 +5,10 @@ import play.api.{ConfigLoader, Configuration}
 /**
  * How this client looks for the boxes its upkeep jobs maintain, and which jobs it runs.
  *
- * Jobs are read generically from `jobs.<name>.enabled`, so registering a new job needs no config
- * code: the registry decides what a name means, and config only says whether it runs. A name that
- * is not in the registry is caught by validation, not here.
+ * Jobs are read generically from `jobs.<name>`, so registering a new job needs no config code: the
+ * registry decides what a name means, and config only says whether it runs, which boxes it is told
+ * about, and whatever keys of its own the job's factory reads from its block. A name that is not in
+ * the registry is caught by validation, not here.
  *
  * @param scanIntervalMs gap between discovery passes. Discovery is background work and must never
  *                       be on the path a block is built on.
@@ -19,27 +20,44 @@ import play.api.{ConfigLoader, Configuration}
  *                        node that could not be read — and the source cannot tell which, so it
  *                        retries after this many passes rather than never; a box refused again
  *                        sits out as many again.
- * @param jobs            each configured job name and whether it is on. Absent is off.
- * @param heartbeat       what the heartbeat job needs beyond its flag. The one job with settings
- *                        of its own so far; a job that needs none is just its flag in `jobs`.
+ * @param jobs            each configured job by name. Absent is off.
  */
 case class UpkeepConfig(scanIntervalMs: Int, maxBoxesPerJob: Int, retryAfterScans: Int,
-                        jobs: Map[String, Boolean],
-                        heartbeat: HeartbeatConfig = HeartbeatConfig.Default) {
-  def jobEnabled(name: String): Boolean = jobs.getOrElse(name, false)
+                        jobs: Map[String, UpkeepConfig.Job]) {
+  def jobEnabled(name: String): Boolean = jobs.get(name).exists(_.enabled)
 }
 
 object UpkeepConfig {
 
   final val Path = "stratum.candidate.sources.upkeep"
 
+  /**
+   * One job's block under `jobs.<name>`: the keys every job may carry, read here once for all of
+   * them, and the block itself for the keys only that job's factory knows.
+   *
+   * @param enabled whether the job runs. Off unless config says otherwise.
+   * @param boxIds  boxes to maintain on a node without `extraIndex`, which cannot be asked for boxes
+   *                by script. These are the boxes as they stand: advancing a box gives it a new id,
+   *                which a plain node cannot be asked to follow, so the list has to be refreshed
+   *                once a listed box has been advanced.
+   * @param block   the whole block, for the job's own keys
+   */
+  final case class Job(enabled: Boolean = false, boxIds: Seq[String] = Seq.empty,
+                       block: Configuration = Configuration.empty)
+
+  object Job {
+    def apply(block: Configuration): Job = Job(
+      enabled = block.getOptional("enabled")(ConfigLoader.booleanLoader).getOrElse(false),
+      boxIds = block.getOptional("boxIds")(ConfigLoader.seqStringLoader).getOrElse(Seq.empty),
+      block = block)
+  }
+
   /** Mirrors the `stratum.candidate.sources.upkeep` block in `application.conf`; keep them in step. */
   val Default: UpkeepConfig = UpkeepConfig(
     scanIntervalMs = 60000,
     maxBoxesPerJob = 256,
     retryAfterScans = 10,
-    jobs = Map.empty,
-    heartbeat = HeartbeatConfig.Default)
+    jobs = Map.empty)
 
   def apply(config: Configuration): UpkeepConfig = {
     def int(key: String, fallback: Int): Int =
@@ -48,16 +66,15 @@ object UpkeepConfig {
     val jobs = config.getOptional(s"$Path.jobs")(ConfigLoader.configurationLoader)
       .map { block =>
         block.subKeys.map { name =>
-          name -> block.getOptional(s"$name.enabled")(ConfigLoader.booleanLoader).getOrElse(false)
+          name -> Job(block.getOptional(name)(ConfigLoader.configurationLoader).getOrElse(Configuration.empty))
         }.toMap
       }
-      .getOrElse(Map.empty[String, Boolean])
+      .getOrElse(Map.empty[String, Job])
 
     UpkeepConfig(
       scanIntervalMs = int("scanIntervalMs", Default.scanIntervalMs),
       maxBoxesPerJob = int("maxBoxesPerJob", Default.maxBoxesPerJob),
       retryAfterScans = int("retryAfterScans", Default.retryAfterScans),
-      jobs = jobs,
-      heartbeat = HeartbeatConfig(config))
+      jobs = jobs)
   }
 }

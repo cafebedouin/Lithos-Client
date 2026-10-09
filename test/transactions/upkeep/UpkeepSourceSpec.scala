@@ -83,8 +83,10 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     val job = new FakeJob(wallet)
     val other = new FakeJob(wallet, "other")
     val upkeepConfig: UpkeepConfig = UpkeepConfig.Default.copy(maxBoxesPerJob = maxBoxes,
-      retryAfterScans = retryAfterScans, jobs = Map(job.name -> jobEnabled, other.name -> jobEnabled))
-    val enabledJobs: Seq[UpkeepJob] = UpkeepRegistry.enabled(upkeepConfig, Seq(job, other).take(jobs))
+      retryAfterScans = retryAfterScans, jobs = Map(
+        job.name -> UpkeepConfig.Job(enabled = jobEnabled), other.name -> UpkeepConfig.Job(enabled = jobEnabled)))
+    val enabledJobs: Seq[UpkeepJob] = UpkeepRegistry.enabled(upkeepConfig,
+      Seq(job, other).take(jobs).map(fake => JobFactory(fake.name, _ => fake)))
     val memory = new UpkeepSource.Memory(retryAfterScans)
     val props: Props = Props(new UpkeepSource(nodeContext, upkeepConfig, limits.copy(enabled = enabled),
       enabledJobs, memory, useTrueProp = false))
