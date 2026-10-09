@@ -142,5 +142,5 @@ practice goes to whoever produces the next block, this miner or an executor whos
   together, the beat accepted by the node's check (the node's stateful validation at its next height, not the mempool's
   fee floor) and the block by consensus. The rig is outside this repository; `DEVNET.md` says what any private-chain
   run needs.
-- `sbt test` on Java 17 at this branch's head: 2,770 tests, all passing. (A load-sensitive spec outside this change,
+- `sbt test` on Java 17 at this branch's head: 2,772 tests, all passing. (A load-sensitive spec outside this change,
   `SnapshotFallbackSpec`, has a one-line fix in its own PR.)
