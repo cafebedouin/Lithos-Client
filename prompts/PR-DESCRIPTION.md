@@ -28,6 +28,24 @@ as capital the holding top-up aggregates, and beats for free when that is too sm
 No due-job box exists on mainnet yet. Lithos itself has mined about 30 mainnet blocks so far (heights 1,888,828 to
 1,890,575, about 1.7% of blocks over that span), so upkeep carried only in Lithos blocks waits about 60 blocks today.
 
+### Running on a private chain
+
+The client compiles its protocol contracts from token ids fixed per network, so on a chain with no Lithos
+deployment it finds no collateral box and never builds a Lithos block. Two small pieces change that, and they
+are what let the source be tested end to end on a devnet rather than on mainnet:
+
+- `node.deployment.file`: a JSON descriptor of a deployment (the token ids, the genesis dictionary box, the
+  protocol box ids) that `Deployment.install` reads at startup in place of the network's constants. Empty by
+  default; refused on mainnet unless `allowOnMainnet = true`; a descriptor that does not parse, names a
+  malformed id, or names another network stops the client with the key at fault.
+- `tools.DeployProtocol`: a deployer that mints the eight protocol tokens, creates the emission, config, fraud
+  control and dictionary genesis boxes with the client's own contract code, writes the descriptor, and can
+  fund operator keys with ERG and LIT. One transaction per step, each waited for. `DEVNET.md` documents both.
+
+A spec pins every protocol contract's tree on mainnet and testnet (`test/resources/deployment/contract-pins.txt`)
+so that neither piece can move a mainnet tree unnoticed, and checks that an override reaches every contract
+that compiles an id in and nothing else.
+
 ## Why
 
 Storage rent showed that this client can carry keyless, fee-less work in its own blocks, and that a Lithos
@@ -93,10 +111,22 @@ pending transaction already spends is skipped for that block.
 - `HeartbeatJobSpec`: the heartbeat's own rule — the pinned tree, which boxes at its script are beats, `due`
   at the boundary, the successor and tip as planned and signed, a partial tip when the box cannot spare the
   whole, and a free beat when what it can spare is too small for a box.
+- `DeployPlanSpec` and `ProtocolContractsDeploymentSpec`: the deployer's plan (mint, protocol boxes, descriptor,
+  funding) against a fake node, the self-join a funded operator can make with the client's own builders, the
+  refusal of funding below one join, the command line; and the contract pins: with no override every tree is
+  the pinned one, an override reaches every contract that compiles an id in and leaves `payout` and the other
+  network alone, and it is not served from a cache filled before it was installed.
 - `DueJobSpec`: the contract through the interpreter, offline — a due box advances, one block early is
   refused, every condition of the script refused on the field it reads, two boxes sharing one successor
   refused, a stale creation height refused, a zero period refused, a tip above the value taking all but a
   box's minimum, and R4 + R5 computed in Long.
+- End to end. A due-job box is live on testnet (`e5d9d2c2…`, period 720, tip 0.01 ERG). On a private chain
+  with 20-second blocks, one command of the operator's network rig goes from a wiped chain to a block the
+  client built: the deployer deploys the protocol, the client joins the collateral queue with its own ERG and
+  LIT, and block 76 carries the client's genesis transaction and the upkeep beat together, the beat accepted
+  by the node's check and the block by consensus. The rig (topology, node settings, an `/info` rewriting proxy
+  for appkit, a CPU miner) lives in that repository, not here; `DEVNET.md` says what any private-chain run
+  needs.
 - `sbt test` on Java 17: 2,698 tests. The only failures are the 8 cases of `state.persistence.SnapshotFallbackSpec`,
   which is load-sensitive and fails the same way without this change: "keep a generation whose header could
   not be read", "restore a generation the node confirms", "fall past a disproved generation to an older
