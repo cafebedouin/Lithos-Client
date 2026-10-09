@@ -29,9 +29,9 @@ The node must run with `ergo.node.extraIndex = true`.
 ## The deployer
 
 ```sh
-sbt "runMain tools.DeployProtocol --node http://127.0.0.1:9153 --api-key hello \
+java -cp "target/universal/stage/lib/*" tools.DeployProtocol --node http://127.0.0.1:9153 --api-key hello \
   --keystore <keystore.json> --pass <pass> --network TESTNET --out deployment.json \
-  [--fund <address>:<nanoERG>:<LIT base units>]... [--force] [--timeout-seconds 1800]"
+  [--fund <address>:<nanoERG>:<LIT base units>]... [--force] [--timeout-seconds 1800]
 ```
 
 It signs with the keystore's EIP-3 index 0 key and spends that key's token-free boxes and matured
