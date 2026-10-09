@@ -88,10 +88,8 @@ object HeartbeatJob {
   def compile(networkType: NetworkType): Contract = UpkeepContracts.mkDueJobContract(networkType)
 
   /**
-   * A due-job box's registers, read. Only R4 Int, R5 Int and R6 Long count; a box with anything
-   * else there is not one of these and is passed over, since its script would refuse the spend
-   * (`R4[Int].get` on a Long fails) and a period of zero or less is due every block, which no
-   * heartbeat means.
+   * A due-job box's registers, read: R4 Int, R5 Int and R6 Long, with a positive period and a tip
+   * not below zero. Anything else is passed over, because the script refuses to spend it.
    */
   final case class Beat(lastBeat: Int, period: Int, tip: Long) {
     def dueHeight: Long = lastBeat.toLong + period.toLong

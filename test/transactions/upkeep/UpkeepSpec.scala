@@ -218,7 +218,7 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
 
   // ─── config ───────────────────────────────────────────────────────────────
 
-  /** As the Lithos maintainers asked: on only when the operator says so, and then job by job. */
+  /** On only when the operator says so, and then job by job. */
   "The default" should "leave the source off and no job on" in {
     CandidateConfig.Default.sources(CandidateSourceConfig.Upkeep).enabled shouldBe false
     UpkeepConfig.Default.jobs shouldBe empty
@@ -248,14 +248,14 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       "stratum.candidate.sources.upkeep.scanIntervalMs" -> 5000,
       "stratum.candidate.sources.upkeep.retryAfterScans" -> 3,
       "stratum.candidate.sources.upkeep.jobs.heartbeat.enabled" -> true,
-      "stratum.candidate.sources.upkeep.jobs.dexy.enabled" -> false)))
+      "stratum.candidate.sources.upkeep.jobs.nosuchjob.enabled" -> false)))
 
     config.scanIntervalMs shouldBe 5000
     config.maxBoxesPerJob shouldBe UpkeepConfig.Default.maxBoxesPerJob
     config.retryAfterScans shouldBe 3
-    config.jobs.map { case (name, job) => name -> job.enabled } shouldBe Map("heartbeat" -> true, "dexy" -> false)
+    config.jobs.map { case (name, job) => name -> job.enabled } shouldBe Map("heartbeat" -> true, "nosuchjob" -> false)
     config.jobEnabled("heartbeat") shouldBe true
-    config.jobEnabled("dexy") shouldBe false
+    config.jobEnabled("nosuchjob") shouldBe false
     config.jobEnabled("never-mentioned") shouldBe false
   }
 
@@ -297,9 +297,9 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     val ids = Seq("ab" * 32, "cd" * 32)
     val config = UpkeepConfig(Configuration.from(Map(
       "stratum.candidate.sources.upkeep.jobs.heartbeat.boxIds" -> ids,
-      "stratum.candidate.sources.upkeep.jobs.dexy.boxIds" -> ids.take(1))))
+      "stratum.candidate.sources.upkeep.jobs.nosuchjob.boxIds" -> ids.take(1))))
     config.jobs("heartbeat").boxIds shouldBe ids
-    config.jobs("dexy").boxIds shouldBe ids.take(1)
+    config.jobs("nosuchjob").boxIds shouldBe ids.take(1)
     config.jobEnabled("heartbeat") shouldBe false
   }
 
@@ -357,15 +357,15 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
   }
 
   it should "refuse an enabled job the registry does not know, and not a disabled one" in {
-    validated("stratum.candidate.sources.upkeep.jobs.dexy.enabled = true")
-      .getOrElse(fail("an unknown enabled job was accepted")) should include("jobs.dexy.enabled")
-    validated("stratum.candidate.sources.upkeep.jobs.dexy.enabled = false") shouldBe None
+    validated("stratum.candidate.sources.upkeep.jobs.nosuchjob.enabled = true")
+      .getOrElse(fail("an unknown enabled job was accepted")) should include("jobs.nosuchjob.enabled")
+    validated("stratum.candidate.sources.upkeep.jobs.nosuchjob.enabled = false") shouldBe None
   }
 
   /** The list is generic, so a job the client does not run yet is held to it too. */
   it should "check boxIds for every job that lists them" in {
     val good = "ab" * 32
-    Seq("heartbeat", "dexy").foreach { job =>
+    Seq("heartbeat", "nosuchjob").foreach { job =>
       val key = s"stratum.candidate.sources.upkeep.jobs.$job.boxIds"
       validated(s"""$key = ["$good"]""") shouldBe None
       validated(s"""$key = ["$good", "${good.toUpperCase}"]""")

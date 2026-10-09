@@ -35,7 +35,7 @@ class ScriptJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
 
   /**
    * @param indexed whether the node reports the extra index
-   * @param boxIds  the configured fallback list
+   * @param boxIds  the configured list
    */
   private class Fixture(indexed: Boolean = true, boxIds: Seq[String] = Seq.empty) {
     val api: NodeApi = mock[NodeApi]
@@ -262,7 +262,7 @@ class ScriptJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
   }
 
   /** The builder cannot place sub-minimum change without a fee output, which a block transaction has none of. */
-  it should "throw on a plan that does not spend the box exactly, naming the job" in {
+  it should "throw on a plan that does not spend all of the box, naming the job" in {
     val f = new Fixture()
     f.client.execute { ctx =>
       f.job.leftOver = 1L

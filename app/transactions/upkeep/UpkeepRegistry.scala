@@ -5,13 +5,10 @@ import play.api.Configuration
 import transactions.upkeep.jobs.HeartbeatJob
 
 /**
- * How a registered job is made from its config block.
- *
- * A function rather than a job value because a job may have settings of its own, and a factory
- * rather than a case class per job under `configs` so that a new job's settings are that job's
- * file and nothing else. The keys every job may carry, `enabled` and `boxIds`, are read and
- * validated by the framework before the factory sees them; everything else in the block is the
- * factory's to read and, through `check`, to validate.
+ * How a registered job is made from its config block. A factory rather than a case class under
+ * `configs`, so a new job's settings live in that job's file. `enabled` and `boxIds` are read and
+ * validated by the framework; every other key is the factory's to read and, through `check`, to
+ * validate.
  *
  * @param name  the key under `stratum.candidate.sources.upkeep.jobs`, and the name of the job made
  * @param make  the job, from its block as config states it
@@ -24,11 +21,9 @@ final case class JobFactory(name: String,
                             check: Configuration => Seq[(String, String)] = _ => Seq.empty)
 
 /**
- * Every upkeep job this client knows, in the order their work is offered to a block.
- *
- * A job is registered here and nowhere else: config can only turn a registered job on, so an
- * operator cannot be made to run maintenance that was never reviewed, and a name in config that
- * matches nothing is reported at startup rather than silently never run.
+ * Every upkeep job this client knows, in the order their work is offered to a block. Config can
+ * only turn on a job registered here, so no one runs maintenance that was never reviewed, and a job
+ * name that is enabled and unknown is refused at startup.
  */
 object UpkeepRegistry {
 

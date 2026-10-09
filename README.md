@@ -146,9 +146,8 @@ rigel.exe -a autolykos2 -o stratum+tcp://127.0.0.1:4444 -u YOUR_ERG_WALLET -w my
 Keep in mind that the `ERG_WALLET` and Worker name have no effect on Lithos, and can be set to any valid String.
 
 ## Block Transactions
-Besides the genesis transaction, a block you find carries transactions the client builds for itself: rollup work,
-storage-rent collections, order executions. They pay no fee and are configured under `stratum.candidate` in
-`application.conf`, one block per source under `sources`, each with its own limits on transactions, bytes and cost.
+A block you find also carries fee-less transactions the client builds for itself, configured per source under
+`stratum.candidate.sources` in `application.conf`.
 
 ### Upkeep
 Upkeep is maintenance of other protocols' boxes carried in your own block: boxes whose script says when one is
@@ -162,22 +161,23 @@ stratum.candidate.sources.upkeep.enabled = true
 stratum.candidate.sources.upkeep.jobs.heartbeat.enabled = true
 ```
 The first job, `heartbeat`, advances due-job boxes (`DueJob.ergo` in lithos-lib) and pays their tip to your
-collection output. Finding them by script needs a node started with `ergo.node.extraIndex = true`; on a plain
-node, list the boxes to maintain in `jobs.heartbeat.boxIds` (every job takes `boxIds` the same way). A job name
-the client does not know is refused at startup.
+collection output. Finding them by script needs a node started with `ergo.node.extraIndex = true`. Any node also
+reads the boxes listed in `jobs.heartbeat.boxIds` (every job takes `boxIds` the same way); on a plain node that
+list is all the job sees, and it goes stale after each beat, because a beat gives the box a new id. A job name
+that is enabled and unknown is refused at startup.
 
-Until your miner finds a block there is nothing to see upkeep do, so it has an observe mode:
+Before each successor is offered, your node checks it (`verifyWithNode = true`), and one the node refuses is left
+out. Until your miner finds a block there is nothing to see upkeep do, so it has an observe mode:
 ```hocon
 stratum.candidate.sources.upkeep.mode = "observe"
 ```
-Upkeep then builds everything exactly as it would for your block, asks your node to check each transaction, logs
-the verdict and what it would have offered, and offers nothing.
+Upkeep then answers every block request empty and, in the background, builds what it would have offered, asks
+your node to check each transaction (up to `maxTxs` checks per block) and logs the verdict.
 
 Upkeep never spends your ERG. A job's transaction may only spend the boxes that job found, and the client refuses
-one that spends anything else; your wallet is never an input and no fee is paid. It does not reorder, front-run or
-replace anyone's transaction either: it advances boxes whose own scripts invite it, in the order the scripts
-allow, and nothing else in the block is touched. A box a job cannot advance is set aside and tried again after
-`retryAfterScans` discovery passes.
+one that spends anything else; your wallet is never an input and no fee is paid. It does not read pending
+transactions, so it reorders and front-runs nothing. A box whose build fails is set aside and tried again after
+`retryAfterScans` discovery passes; a box that cannot pay its successor is set aside until it changes.
 
 ## KYA
 The Lithos Testnet release accesses your node's secret keys via it's keystore in order to sign and generate transactions.

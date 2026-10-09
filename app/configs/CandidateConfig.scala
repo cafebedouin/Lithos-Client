@@ -52,8 +52,8 @@ object CandidateConfig {
       CandidateSourceConfig.ErgoDex -> CandidateSourceConfig.Default.copy(maxTxs = 20),
       // On by default: LithosDex is the protocol's own DEX. Slots include placements and the flush.
       CandidateSourceConfig.LithosDex -> CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 20),
-      // Off until the operator turns it on, as the Lithos maintainers asked: which protocols a miner
-      // maintains is their call, and nothing here earns until a job is enabled. One slot per box.
+      // Off until the operator turns it on: which protocols a miner maintains is their call, and
+      // nothing here earns until a job is enabled. One slot per box.
       CandidateSourceConfig.Upkeep -> CandidateSourceConfig.Default.copy(enabled = false)),
     blockShare = 0.5,
     useTruePropCollection = false,

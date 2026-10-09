@@ -18,29 +18,20 @@ import scala.util.{Failure, Success, Try}
 /**
  * Advances the boxes its jobs maintain inside this miner's own block, with no key and no fee.
  *
- * The same two halves as the storage-rent source, and for the same reason. A timer asks each job
- * what it maintains and remembers only box ids; the candidate path reads those boxes back, keeps
- * the ones the job says are due, has the job build each successor until this source's share is
- * spent, and answers through [[transactions.candidate.CandidatePreparation]]. Ids are all that is
- * kept between the two because the read that fetches a box back is the only check that matters: a
- * box that does not come back is spent, or spent by a pending transaction, and a box that does is
- * judged fresh. Nothing on the mining path reads the actor's fields; the build closes over values
- * it is handed and reports back by message.
+ * Two halves, as in the storage-rent source. A timer asks each job what it maintains and keeps only
+ * ids; the candidate path reads the boxes back, has each job build the due ones until the share is
+ * spent, and answers through [[transactions.candidate.CandidatePreparation]]. The read-back is the
+ * only check that matters: a box that does not come back is spent. The build closes over values it
+ * is handed and reports back by message, so no actor field is read off the mailbox.
  *
  * Never extractive. Nothing here reads pending transactions, so nothing reorders or front-runs
  * anyone, and a job's transaction may only spend the boxes that job discovered.
  *
- * A box a job could not advance is held in a [[UpkeepSource.Memory]] that outlives the actor, so a
- * restart does not offer the node the same transaction again. A box the job says cannot pay is held
- * until a scan stops finding it; one whose build failed is offered again after the configured
- * number of passes, in case what refused it has passed.
- *
- * In candidate mode with `verifyWithNode`, every successor the share admits is put through the
- * node's transaction check before it is offered, and one the node refuses is refused here. The
- * check runs in the build, which starts on `PrepareBlockTxs` and so off the request path, and the
- * node evaluates it at the next block's height, the same height the candidate is built for. In
- * observe mode every request is answered empty at once, and the build and the checks run as a task
- * of their own on the worker that no request waits for.
+ * Holds outlive the actor in a [[UpkeepSource.Memory]], so a restart does not offer the node the
+ * same transaction again. With `verifyWithNode`, each admitted successor goes through the node's
+ * transaction check in the build `PrepareBlockTxs` starts, off the request path, and the node
+ * evaluates it at the next block's height, the candidate's own. In observe mode a request is
+ * answered empty at once and the build runs as a task no request waits for.
  */
 class UpkeepSource(nodeContext: NodeContext,
                    upkeepConfig: UpkeepConfig,
@@ -197,17 +188,13 @@ class UpkeepSource(nodeContext: NodeContext,
     }
 
   /**
-   * Read every offered box back, build a successor for each one its job says is due until the
-   * share is spent, and return what the share admitted.
+   * Read every offered box back and build a successor for each due one until the share is spent.
    *
-   * The read is the revalidation, in chunks of [[ReadChunk]] ids: ids that do not come back are
-   * spent and are forgotten. It is the node's mempool-adjusted view, so a box a pending transaction
-   * spends is skipped for this block. A read that fails builds nothing and forgets nothing.
-   *
-   * A box is sized before it is signed and left for a later block when its floor does not fit, and
-   * nothing is signed once the share is full or [[MaxRefusedPerBuild]] boxes have been refused. The
-   * order starts at `blockHeight` modulo the number of boxes, so a box deferred at the head every
-   * block does not starve the ones behind it.
+   * The read, in chunks of [[ReadChunk]], is the node's mempool-adjusted view: an id that does not
+   * come back is spent, or spent by a pending transaction, and is skipped. A failed read builds
+   * nothing. A box is sized before it is signed, and building stops at a full share or after
+   * [[MaxRefusedPerBuild]] refusals. The order starts at `blockHeight` modulo the number of boxes,
+   * so a box deferred at the head does not starve the ones behind it.
    */
   private def advance(work: Seq[JobWork], blockHeight: Int): Vector[Upkeep.Prepared] =
     Try(nodeContext.getClient.execute { ctx =>
@@ -278,10 +265,8 @@ class UpkeepSource(nodeContext: NodeContext,
     }
 
   /**
-   * The successors the node's transaction check accepts. One the node refuses is refused here, so
-   * it is not built again every block, and is left out: a package the node rejects loses every
-   * inserted transaction with it. A check that cannot be made counts as a refusal for the same
-   * reason.
+   * The successors the node's check accepts. One it refuses, or cannot check, is left out and
+   * refused here, because a package the node rejects loses every inserted transaction with it.
    */
   private def verified(chosen: Vector[Upkeep.Prepared], blockHeight: Int): Vector[Upkeep.Prepared] = {
     val (accepted, refused) = chosen.partition { successor =>
@@ -299,13 +284,9 @@ class UpkeepSource(nodeContext: NodeContext,
   }
 
   /**
-   * One box through its job: due or not; if due, whether it is worth building against what is
-   * left of the share; and if built, a successor admitted to the share or the reason there is none.
-   *
-   * Every call into the job is caught, because a job is reviewed code but not trusted code, and a
-   * throw on one box must not cost the block every other box's successor. A box whose serialized
-   * form does not hash to the id the node gave it is refused before the job sees it, since a
-   * transaction built from it would spend a box that does not exist.
+   * One box through its job: due, worth building against the share, and admitted, or why not. Every
+   * call into the job is caught, so a throw on one box costs only that box. A box whose bytes do not
+   * hash to the id the node gave is refused, since a transaction from it would spend nothing real.
    */
   private def attempt(bc: BuildContext, item: JobWork, box: NodeBox, share: Upkeep.Share): Attempt = {
     val job = item.job
@@ -357,10 +338,8 @@ class UpkeepSource(nodeContext: NodeContext,
     }
 
   /**
-   * Observe mode's report on one successor the block would have carried: the node's verdict on the
-   * signed transaction, and what it would have cost the block and paid this miner. A refusal is
-   * logged and nothing more, because what is being watched is the job, and a box set aside would
-   * stop being watched.
+   * Observe mode's report on one successor: the node's verdict, and what it would have cost and paid.
+   * A refusal is logged and nothing more, because a box set aside would stop being watched.
    */
   private def report(successor: Upkeep.Prepared, blockHeight: Int): Unit = {
     val offer = s"Upkeep observe at $blockHeight: ${successor.label} as tx ${successor.tx.id}, " +
@@ -424,17 +403,13 @@ object UpkeepSource {
     }
 
   /**
-   * Boxes held back from builds, outside the actor so a restart cannot forget them.
+   * Boxes held back from builds, built once where the source is wired so a restarted actor, whose
+   * fields Akka empties, keeps them. Only the actor's thread touches it; the atomics are for
+   * visibility across restarts.
    *
-   * Akka rebuilds a restarted actor from its `Props`, which empties every field, so the memory is
-   * constructed once where the source is wired and handed to every incarnation. Only the actor's
-   * own thread touches it; the atomics are for visibility across restarts, not contention.
-   *
-   * Two kinds of hold. A box refused, whose build failed, may have been refused by the moment — a
-   * node that could not be read, a job tripped by something that has since passed — so it expires
-   * after `retryAfterScans` passes have found it unchanged, and a box refused again sits out as
-   * many again. A box exhausted, which its job says cannot pay, will not pay later either, so it is
-   * held until a scan stops finding it. Either is dropped at once when no pass finds the box.
+   * A refused box, whose build failed, may have met a passing fault, so it is offered again after
+   * `retryAfterScans` passes. An exhausted box, which cannot pay, will not pay later either, so it is
+   * held until a scan stops finding it. Either is dropped once no pass finds the box.
    *
    * @param retryAfterScans passes a refused box sits out, counted from the first that lands after
    *                        the refusal

@@ -19,7 +19,7 @@ import scala.util.{Failure, Success, Try}
  *
  * A plan rather than a transaction, so the job states only what its protocol decides and
  * [[ScriptJob]] does the assembly every such job would otherwise repeat. The outputs must spend the
- * box's value exactly: [[ScriptJob]] refuses a plan that leaves change, since the builder cannot
+ * box's value to the nanoERG: [[ScriptJob]] refuses a plan that leaves change, since the builder cannot
  * place sub-minimum change without a fee output and a block transaction carries none.
  *
  * @param outputs    every output, in the order the protocol's script reads them
@@ -33,29 +33,22 @@ final case class Successor(outputs: Seq[UTXO],
                            revenue: Seq[Int] = Seq.empty)
 
 /**
- * An upkeep job whose boxes all sit at one known script, and whose successor is a fixed function of
- * the box: the heartbeat, a Dexy tracker, an expiry refund. Such a job is its rule and nothing else:
- * the script, when a box is due, what the successor is, and which boxes go first.
+ * An upkeep job whose boxes all sit at one script and whose successor is a fixed function of the
+ * box. Such a job is its rule: the script, when a box is due, the successor, and which boxes go
+ * first. Everything around the rule is written once here rather than in every job:
  *
- * Everything around the rule is written once here, because each copy of it in a job would be one
- * more place to get wrong what the framework promises:
+ *  - Discovery. On an indexed node, every confirmed box at the script, lowest [[priority]] first.
+ *    On every node, indexed or not, the ids under `jobs.<name>.boxIds`, each read from the UTXO set
+ *    with one `boxById` call, so an unconfirmed box is never spent without its parent. That list is
+ *    not a fallback: its boxes come first and are never cut. A box is kept only if it sits at the
+ *    script, the job [[maintains]] it, and EIP-27 does not block it.
+ *  - Assembly: the box as the only input, the plan's data inputs, no fee, outputs spending the box
+ *    to the nanoERG.
+ *  - Signing with a prover that holds no secret. The preHeader carries only the height, so a script
+ *    reading the miner's key, votes or timestamp would sign here and be refused by the node.
  *
- *  - Discovery. On a node with the extra index, every confirmed box at the script, soonest
- *    [[priority]] first. On every node, indexed or not, the ids listed under `jobs.<name>.boxIds`,
- *    each read from the UTXO set with one `boxById` call, so an unconfirmed box is never spent
- *    without its parent; the list is not a fallback, and its boxes come first and are never cut at
- *    the source's cap. A box is kept only if it sits at the script, its job [[maintains]] it, and
- *    EIP-27 does not block it, so a box anyone can create at a public script cannot take a place by
- *    being malformed.
- *  - Assembly with no fee and no wallet input: the one box as the only input, the plan's data inputs,
- *    and outputs that spend the box exactly.
- *  - Signing with a prover that holds no secret, so this miner's keys are never in reach of a job.
- *    The preHeader at signing carries only the block's height. A script that reads the miner's key,
- *    votes or the timestamp from it would sign here against placeholder values and be refused by the
- *    node, so such a protocol does not fit this shape.
- *
- * A job that does not fit — several protocol boxes in one transaction, a box found by token rather
- * than script — implements [[UpkeepJob]] directly.
+ * A job that does not fit, such as one spending several protocol boxes at once, implements
+ * [[UpkeepJob]] directly.
  *
  * @param boxIds boxes the operator lists for this job, read on every discovery pass
  */
@@ -131,11 +124,7 @@ object ScriptJob {
   private[upkeep] final val PageSize = 100
   private[upkeep] final val MaxPages = 10
 
-  /**
-   * A job's contract compiled once per network and then shared: discovery compares every box
-   * against its tree on every pass, and compiling ErgoScript for each would be the dearest thing the
-   * scan does.
-   */
+  /** A contract compiled once per network, since discovery compares every box against it every pass. */
   final class PerNetwork(compile: NetworkType => Contract) {
     private val compiled = new ConcurrentHashMap[NetworkType, Contract]()
 
@@ -145,10 +134,7 @@ object ScriptJob {
 
   /**
    * The least value `out` may carry: the node's price per byte times the box's serialized length,
-   * reference to its transaction included, which is what the node counts for the minimum.
-   *
-   * Here for a job's [[ScriptJob.plan]], since saying whether a box can still pay for its successor
-   * is the job's and sizing a box is the same for every job.
+   * reference to its transaction included. For a job's [[ScriptJob.plan]] to size its outputs.
    */
   def minimumValue(out: UTXO, bc: BuildContext): Long =
     bc.params.getMinValuePerByte.toLong *
@@ -164,7 +150,7 @@ object ScriptJob {
         s"(${successor.outputs.size} outputs)")
     val spent = successor.outputs.map(_.value).sum
     require(spent == box.value,
-      s"$job's plan spends $spent of the box's ${box.value} nanoERG; it must spend the box exactly")
+      s"$job's plan spends $spent of the box's ${box.value} nanoERG; it must spend all of it")
     val unsigned = TxBuilder(bc.ctx)
       .setInputs(box)
       .setDataInputs(successor.dataInputs: _*)

@@ -6,38 +6,18 @@ import transactions.candidate.CapitalEntry
 import work.lithos.mutations.{Contract, InputUTXO}
 
 /**
- * One kind of keyless, fee-less maintenance this miner may carry in its own block.
+ * One kind of keyless, fee-less maintenance this miner may carry in its own block: which boxes of
+ * one protocol it maintains, when one is due, and what its successor is.
  *
- * A job is a reviewed description of one protocol's boxes: which ones it maintains, when one is
- * due, and what its successor is. The source around it owns everything else — the timer, the
- * revalidation, the budget, the refusals — so a new protocol is one implementation of this trait
- * and one config line, with no actor code of its own to get wrong. A job whose boxes sit at one
- * script and whose successor is a fixed function of the box extends [[ScriptJob]], which is that
- * job's rule and nothing more; this trait is for a job that does not fit that shape.
+ * The source owns the timer, the read-back, the budget and the refusals, so a new protocol is one
+ * implementation, one entry in [[UpkeepRegistry.all]], and one config block. A job whose boxes sit
+ * at one script extends [[ScriptJob]]; this trait is for one that does not fit that shape.
  *
- * The rules a job has to keep. The framework enforces the first where it can and takes the rest on
- * trust, which is why every job is reviewed before it is registered:
- *
- *  1. No wallet input, no fee output. The inputs are the boxes the job discovered, and nothing
- *     else: the source refuses a transaction spending any other box. This miner's own ERG is never
- *     on the line, and a block transaction carries no fee.
- *  2. A deterministic successor. Given the box and the height, the outputs are fixed. No search,
- *     no pricing, no market reads: a job that has to choose is not upkeep, however keyless it is.
- *  3. Revenue goes to `payTo`, the collection contract the source hands in, and is declared as a
- *     [[transactions.candidate.CapitalEntry]] so the package's final top-up can aggregate it. A
- *     job may earn nothing.
- *  4. Discovery returns ids, and the build gets the box read back fresh. What a scan found is
- *     stale by the time a block is built, so nothing a job learned at discovery may be trusted at
- *     build time.
- *  5. "Not yet" belongs in [[due]], "cannot" in [[build]]. A box `build` returns nothing for, or
- *     throws on, is remembered as refused and not tried again until it changes or until the
- *     configured number of discovery passes has gone by, so a job that says no to a box it will
- *     be able to advance next block stalls that box for that long.
- *  6. Bounded: the source sizes every due box against what is left of its own share before the
- *     job builds it, measures what the job built, and fits that to the share before the package
- *     does. A job need not count; it may not understate.
- *  7. Never extractive. Nothing here reorders, front-runs or sandwiches anyone's transaction, and a
- *     job that would is not accepted into the registry.
+ * A job spends only the boxes it discovered, with no wallet input and no fee output, and its
+ * successor is fixed by the box and the height. "Not yet" belongs in [[due]] and "cannot pay" in
+ * [[build]], since a box `build` declines is held until a scan stops finding it. A job need not
+ * count what it builds, because the source sizes and fits every successor, but it is reviewed
+ * before it is registered, because the rest is taken on trust.
  */
 trait UpkeepJob {
 
@@ -48,12 +28,9 @@ trait UpkeepJob {
   def name: String
 
   /**
-   * The ids of every box this job maintains right now, as the node reports them.
-   *
-   * Called on the scan timer, never on the mining path, so it may page the node. It may throw: the
-   * source logs the failure and keeps what the last pass found. The box behind an id is read back
-   * before anything is built, which is why ids are all that is returned — anything more would be
-   * stale by then.
+   * The ids of every box this job maintains right now. Called on the scan timer, so it may page the
+   * node, and it may throw, which keeps the last pass. Ids only, because the box is read back fresh
+   * before anything is built.
    */
   def discover(ctx: BlockchainContext, api: NodeApi, height: Int): Seq[String]
 
@@ -63,49 +40,34 @@ trait UpkeepJob {
    */
   def configured: Set[String] = Set.empty
 
-  /**
-   * Whether `box` may be advanced in a block at `height`. Pure: a decision from the box's own
-   * registers and the height, with no node read, because it is asked once per tracked box per
-   * block.
-   */
+  /** Whether `box` may be advanced at `height`. Pure, because it is asked of every box every block. */
   def due(box: InputUTXO, height: Int): Boolean
 
   /**
-   * The successor transaction for one due box, signed, or nothing when the box cannot be advanced.
-   *
-   * Signed by the job rather than the source because only the job knows what satisfies its
-   * script: a box guarded by a condition that reduces to true takes an empty proof, which a prover
-   * holding no secret produces. The outputs are created at `bc.height`, the block they will land
-   * in, and any revenue sits at `bc.payTo`. The preHeader at signing carries only that height: a
-   * script reading the miner's key, votes or timestamp would sign here and be refused by the node.
+   * The signed successor for one due box, or nothing when the box cannot pay for it. Signed by the
+   * job because only the job knows what satisfies its script. Outputs are created at `bc.height`
+   * and revenue sits at `bc.payTo`. The preHeader at signing carries only that height: a script
+   * reading the miner's key, votes or timestamp would sign here and be refused by the node.
    */
   def build(box: InputUTXO, bc: BuildContext): Option[UpkeepJob.Built]
 }
 
 object UpkeepJob {
 
-  /**
-   * What a job hands back for one box: the signed successor and the outputs of it that are this
-   * miner's revenue. Sized by the source, not the job, from the signed bytes and the cost signing
-   * reported, so no job can understate what it costs the block.
-   */
+  /** The signed successor and its revenue outputs. The source sizes it, so no job can understate it. */
   final case class Built(tx: SignedTransaction, capital: Seq[CapitalEntry] = Seq.empty)
 }
 
 /**
- * Everything a build may need beyond the box, gathered once per block build and handed to every job.
+ * Everything a build may need beyond the box, gathered once per block: one value, so a field a later
+ * job needs is added here rather than to every job's signature, and once, because the node's
+ * parameters are the same for every box in a block.
  *
- * One value rather than an argument list, so a field a later job needs is added here and not to the
- * signature of every job; and gathered once, because the node's parameters are the same for every
- * box in a block and reading them per box would be one node read per box for nothing.
- *
- * @param ctx     the appkit context the build runs in; a job may read boxes through it, such as a
- *                data input
- * @param params  the node's parameters for this block: price per byte, per-input and per-output cost
- * @param height  the block the successor will land in, which outputs are created at and a due rule
- *                is written against
+ * @param ctx     the appkit context the build runs in, through which a job may read a data input
+ * @param params  the node's parameters for this block
+ * @param height  the block the successor lands in
  * @param payTo   the collection contract revenue is paid to
- * @param network the network this client runs on, which picks a job's compiled contract
+ * @param network the network this client runs on
  */
 final case class BuildContext(ctx: BlockchainContext, params: BlockchainParameters, height: Int,
                               payTo: Contract, network: NetworkType)
