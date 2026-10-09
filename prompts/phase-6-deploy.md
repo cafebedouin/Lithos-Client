@@ -5,6 +5,16 @@ the tooling needed to test upkeep, and any other client feature, on a private de
 by the maintainers for a new testnet. Nothing in it may change behaviour on mainnet or testnet when no deployment
 override is configured.
 
+## The goal this serves
+
+A rig run on a wiped devnet that ends with a Lithos block the client built: its genesis transaction spending a
+collateral box the client itself joined with (`emission.autoCollateralize = true`), and its package carrying an upkeep
+beat. The orchestration hook (peeryard) will assert exactly that: a block whose first transaction spends a box holding
+the deployment's collateral token, and which also contains the heartbeat successor. The deployer therefore has to leave
+the chain in a state the client's own join and activation code accepts as it is written (`EmissionTransactions.planQueue`
+and the queue and permit rules in `EmissionsCore.scala` / `QueueOwnership.scala`), and the descriptor has to carry what
+the hook needs to recognise a Lithos block: the collateral token id, the emission box id and the LIT id.
+
 ## Why
 
 The client compiles its protocol contracts from token ids and genesis coordinates that are compile-time constants
@@ -56,9 +66,11 @@ Steps, each one transaction, each waited for confirmation before the next (poll 
    box's script and R6/R7), find what mainnet actually holds by reading what the readers and contracts check, and
    say in the doc comment what you chose and why.
 4. Write `deployment.json`: every id, the dictionary genesis box id and its inclusion height, the FP control address,
-   the emission and config box ids, the deployer address, the node's network and height.
-5. `--fund`: pay an operator address ERG and LIT from the deployer wallet, so a client with `autoCollateralize = true`
-   can join the queue.
+   the emission and config box ids, the deployer address, the node's network and height. Keys named so a shell hook
+   can read them with `jq` (`collatToken`, `litId`, `emissionBoxId`, ...).
+5. `--fund`: pay an operator address ERG and LIT from the deployer wallet, enough for the client's own join
+   (`CollateralParams.PRINCIPAL_FLOOR` plus the permit's LIT and fees, with margin), so a client with
+   `autoCollateralize = true` joins the queue by itself. Say in the doc what the minimums are and where they come from.
 
 Idempotence: refuse to run against a node whose wallet already holds a token named like these unless `--force`.
 Everything logged at info with the transaction ids. Exit non-zero with the step named on any failure.
@@ -71,8 +83,6 @@ and the end-to-end checks live in the operator's network-infrastructure reposito
 This repository provides only what must compile the contracts: the override in section 1 and the deployer in section
 2. Add `DEVNET.md` at the root as one page: the config keys (`node.deployment.file`, `allowOnMainnet`), the deployer's
 command line and descriptor format, and a pointer that a worked devnet run is maintained outside this repository.
-
-## 4. (merged into 3)
 
 ## 5. Specs
 
