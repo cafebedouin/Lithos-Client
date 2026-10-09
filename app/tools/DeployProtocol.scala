@@ -29,7 +29,7 @@ final class DeployFailure(val step: String, cause: Throwable)
  * {{{
  * sbt "runMain tools.DeployProtocol --node http://127.0.0.1:9153 --api-key hello \
  *   --keystore <keystore.json> --pass <pass> --network TESTNET --out deployment.json \
- *   [--fund <address>:<nanoERG>:<LIT>]... [--force] [--timeout-seconds 1800] [--reward-delay 720]"
+ *   [--fund <address>:<nanoERG>:<LIT>]... [--force] [--allow-mainnet] [--timeout-seconds 1800] [--reward-delay 720]"
  * }}}
  *
  * Signs with the client's own wiring (`SecretStorage` -> `NodeWallet`, `TxBuilder`,
@@ -53,13 +53,14 @@ object DeployProtocol {
                         out: Path,
                         funds: Seq[FundRequest],
                         force: Boolean,
+                        allowMainnet: Boolean,
                         timeoutSeconds: Int,
                         rewardDelay: Int)
 
   val Usage: String =
     """usage: tools.DeployProtocol --node <url> --api-key <key> --keystore <keystore.json> --pass <pass>
       |                            --network <MAINNET|TESTNET> --out <deployment.json>
-      |                            [--fund <address>:<nanoERG>:<LIT base units>]... [--force]
+      |                            [--fund <address>:<nanoERG>:<LIT base units>]... [--force] [--allow-mainnet]
       |                            [--timeout-seconds <n>] [--reward-delay <blocks>]""".stripMargin
 
   /** Every problem with the command line at once, or the arguments. */
@@ -68,11 +69,13 @@ object DeployProtocol {
     var values = Map.empty[String, String]
     var funds = Vector.empty[String]
     var force = false
+    var allowMainnet = false
     var rest = args.toList
     val valued = Set("--node", "--api-key", "--keystore", "--pass", "--network", "--out", "--fund",
       "--timeout-seconds", "--reward-delay")
     while (rest.nonEmpty) rest match {
       case "--force" :: tail => force = true; rest = tail
+      case "--allow-mainnet" :: tail => allowMainnet = true; rest = tail
       case "--fund" :: v :: tail => funds :+= v; rest = tail
       case k :: v :: tail if valued.contains(k) => values += k -> v; rest = tail
       case k :: tail => problems += s"unknown or incomplete argument '$k'"; rest = tail
@@ -94,6 +97,11 @@ object DeployProtocol {
         problems += s"--network must be MAINNET or TESTNET, got $n"; None
       }
     }
+    // Mainnet is the one network where this mints look-alike protocol tokens with a real key; the
+    // client refuses a mainnet descriptor without allowOnMainnet, and the deployer matches it.
+    if (network.contains(NetworkType.MAINNET) && !allowMainnet)
+      problems += "--network MAINNET is refused unless --allow-mainnet is given: this mints tokens named like " +
+        "the protocol's on the real chain"
     val out = req("--out").map(Paths.get(_))
     val timeout = values.get("--timeout-seconds").map(s => Try(s.toInt).toOption.filter(_ > 0).getOrElse {
       problems += s"--timeout-seconds must be a positive integer, got $s"; 0
@@ -113,8 +121,8 @@ object DeployProtocol {
 
     val all = problems.result()
     if (all.nonEmpty) Left(all)
-    else Right(Args(node.get, key.get, keystore.get, pass.get, network.get, out.get, requests, force, timeout,
-      rewardDelay))
+    else Right(Args(node.get, key.get, keystore.get, pass.get, network.get, out.get, requests, force, allowMainnet,
+      timeout, rewardDelay))
   }
 
   def main(raw: Array[String]): Unit = {

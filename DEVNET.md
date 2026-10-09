@@ -31,7 +31,7 @@ The node must run with `ergo.node.extraIndex = true`.
 ```sh
 java -cp "target/universal/stage/lib/*" tools.DeployProtocol --node http://127.0.0.1:9153 --api-key hello \
   --keystore <keystore.json> --pass <pass> --network TESTNET --out deployment.json \
-  [--fund <address>:<nanoERG>:<LIT base units>]... [--force] [--timeout-seconds 1800] [--reward-delay 720]
+  [--fund <address>:<nanoERG>:<LIT base units>]... [--force] [--allow-mainnet] [--timeout-seconds 1800] [--reward-delay 720]
 ```
 
 It is run by classpath because the stage launcher's `-main` cannot see the application jar. It signs
@@ -81,10 +81,9 @@ Ids are 64 hex characters. A Lithos block is one whose first transaction spends 
 
 ## Worked runs
 
-The devnet topology, the indexed mining node, the `/info` rewriting proxy appkit needs, a CPU miner,
-and the end-to-end checks are kept outside this repository, in the operator's network-infrastructure
-repository (`rig/examples/lithos-*`). `lithos-block.sh` there goes from a wiped chain to a block the
-client built, in one command. Two things it does that any private-chain run needs:
+The end-to-end rig used to test this (a devnet topology, an indexed mining node, an `/info`
+rewriting proxy for appkit, a CPU miner, the checks) is not part of this repository. From a wiped
+chain it reaches a block the client built in one command. Two things any private-chain run needs:
 
 - **Mine the first blocks with the node's own miner.** A fresh chain's early work is Autolykos v1,
   which only the node's internal miner solves; it mines with the wallet's first secret and ignores

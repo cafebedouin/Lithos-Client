@@ -221,6 +221,14 @@ class DeployPlanSpec extends AnyFlatSpec with Matchers with MockitoSugar with Be
     problems.exists(_.contains("--bogus")) shouldBe true
   }
 
+  it should "refuse MAINNET unless --allow-mainnet is given" in {
+    val ks = java.nio.file.Files.createTempFile("ks", ".json")
+    val base = Seq("--node", "http://n", "--api-key", "k", "--keystore", ks.toString, "--pass", "p",
+      "--network", "MAINNET", "--out", "/tmp/d.json")
+    DeployProtocol.parseArgs(base).left.toOption.get.exists(_.contains("--allow-mainnet")) shouldBe true
+    DeployProtocol.parseArgs(base :+ "--allow-mainnet").toOption.get.allowMainnet shouldBe true
+  }
+
   it should "take the chain's coinbase lock as --reward-delay, mainnet's 720 by default" in {
     val ks = java.nio.file.Files.createTempFile("ks", ".json")
     val base = Seq("--node", "http://n", "--api-key", "k", "--keystore", ks.toString, "--pass", "p",

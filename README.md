@@ -174,9 +174,10 @@ stratum.candidate.sources.upkeep.mode = "observe"
 Upkeep then answers every block request empty and, in the background, builds what it would have offered, asks
 your node to check each transaction (up to `maxTxs` checks per block) and logs the verdict.
 
-Upkeep never spends your ERG. A job's transaction may only spend the boxes that job found, and the client refuses
-one that spends anything else; your wallet is never an input and no fee is paid. It does not read pending
-transactions, so it reorders and front-runs nothing. A box whose build fails is set aside and tried again after
+Upkeep never spends your ERG: the shipped job spends only boxes at its own script, signs with no key, and pays no
+fee, and the client refuses a job's transaction that spends a box the job did not report. It does not look at pending
+transactions to choose its work; it reads boxes back through the node's mempool-adjusted view, so a box someone else is
+already spending is skipped. A box whose build fails is set aside and tried again after
 `retryAfterScans` discovery passes; a box that cannot pay its successor is set aside until it changes.
 
 ## KYA

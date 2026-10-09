@@ -13,7 +13,8 @@ import work.lithos.mutations.{Contract, InputUTXO, UTXO}
  * A due-job box says in its registers when it is next due (R4 last beat, R5 period) and what it
  * pays (R6 tip). Its script lets anyone recreate it once due, stamped with the block height and
  * lighter by at most the tip, so this job holds no protocol knowledge: discovery is "every box at
- * that tree", due is the register rule, and the successor is the box with R4 rewritten.
+ * that tree", due is the register rule, and the successor is the box with R4 and its creation
+ * height set to the block, any R7 to R9 dropped, and less whatever tip is paid.
  *
  * The tree is pinned, not compiled: [[HeartbeatJob.TreeHex]] is what was reviewed, and a change to
  * the script file cannot change which boxes a running client spends. The spec compiles the script
@@ -22,13 +23,20 @@ import work.lithos.mutations.{Contract, InputUTXO, UTXO}
  * Discovery by script needs the node's extra index; on a plain node the job maintains the box ids
  * listed in `jobs.heartbeat.boxIds`, which go stale with every beat, since a beat gives the box a
  * new id. The source reads each box back through the node's mempool-adjusted view, so a box a
- * pending transaction already spends does not come back and is skipped for that block.
+ * pending transaction already spends does not come back and is dropped until a later scan finds
+ * it again.
  *
  * The beat pays what the box can spare: the tip, or less when paying it in full would leave the
  * successor under the consensus minimum. A payment too small for a box of its own is left in the
  * successor and the beat is made for free, which the script allows and which keeps the box alive.
+ * A box worth less than its own successor's minimum cannot be advanced at all and is declined, so
+ * the source holds it rather than offer a transaction the node would refuse. With `minTip` set, a
+ * box offering less than that is not this job's to maintain, so an operator can decline free beats.
+ *
+ * @param boxIds the ids listed in config, maintained on every node
+ * @param minTip the smallest R6 tip a box must offer to be maintained; 0 maintains every box
  */
-final class HeartbeatJob(boxIds: Seq[String]) extends ScriptJob(boxIds) {
+final class HeartbeatJob(boxIds: Seq[String], minTip: Long = 0L) extends ScriptJob(boxIds) {
 
   import HeartbeatJob.Beat
 
@@ -36,7 +44,7 @@ final class HeartbeatJob(boxIds: Seq[String]) extends ScriptJob(boxIds) {
 
   override def contract(network: NetworkType): Contract = HeartbeatJob.contract(network)
 
-  override def maintains(box: InputUTXO): Boolean = Beat.of(box).isDefined
+  override def maintains(box: InputUTXO): Boolean = Beat.of(box).exists(_.tip >= minTip)
 
   override def due(box: InputUTXO, height: Int): Boolean = Beat.of(box).exists(_.dueAt(height))
 
@@ -44,8 +52,12 @@ final class HeartbeatJob(boxIds: Seq[String]) extends ScriptJob(boxIds) {
   override def priority(box: InputUTXO): Long = Beat.of(box).map(_.dueHeight).getOrElse(Long.MaxValue)
 
   override def plan(box: InputUTXO, bc: BuildContext): Option[Successor] =
-    Beat.of(box).map { beat =>
+    Beat.of(box).flatMap { beat =>
       // Sized at the full value, the most a successor could carry, so the floor is never understated.
+      val successorFloor = ScriptJob.minimumValue(successor(box, beat, bc.height, box.value), bc)
+      // Below its own successor's minimum the box cannot be recreated at all: declined, not built.
+      if (box.value < successorFloor) None else Some(beat)
+    }.map { beat =>
       val successorFloor = ScriptJob.minimumValue(successor(box, beat, bc.height, box.value), bc)
       val paid = math.max(0L, math.min(beat.tip, box.value - successorFloor))
       val tipOut = UTXO(bc.payTo, paid).setCreationHeight(bc.height)
@@ -65,8 +77,15 @@ object HeartbeatJob {
 
   final val Name = "heartbeat"
 
-  /** Made from the keys every job carries: the heartbeat has none of its own. */
-  val Factory: JobFactory = JobFactory(Name, job => new HeartbeatJob(job.boxIds))
+  /** The one key of its own: `minTip`, the smallest tip a box must offer, 0 by default. */
+  final val MinTipKey = "minTip"
+
+  val Factory: JobFactory = JobFactory(Name,
+    job => new HeartbeatJob(job.boxIds, job.block.getOptional[Long](MinTipKey).getOrElse(0L)),
+    check = block => block.getOptional[Long](MinTipKey) match {
+      case Some(t) if t < 0L => Seq(MinTipKey -> "must not be negative")
+      case _ => Seq.empty
+    })
 
   /**
    * The ErgoTree of `upkeep/DueJob.ergo` as reviewed. The script takes no constants and names no
@@ -79,7 +98,8 @@ object HeartbeatJob {
       "db63087203db6308a793e4c672030404a3938cc7720301a393e4c672030504720193e4c672030605720292c17203" +
       "997204a172027204"
 
-  private val pinned: Contract = Contract(ErgoTree.fromHex(TreeHex))
+  // Lazy, so that a class whose name config validation touches parses nothing at startup.
+  private lazy val pinned: Contract = Contract(ErgoTree.fromHex(TreeHex))
 
   /** The pinned contract, whatever the network: discovery compares every box against its tree. */
   def contract(networkType: NetworkType): Contract = pinned

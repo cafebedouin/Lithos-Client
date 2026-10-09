@@ -249,6 +249,35 @@ class HeartbeatJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     }
   }
 
+  /** Below its own successor's minimum the box cannot be recreated: declined, so the source holds it. */
+  it should "decline a box worth less than its successor's floor rather than build one the node refuses" in {
+    val f = new Fixture()
+    f.client.execute { ctx =>
+      val height = ctx.getHeight + 1
+      val bc = BuildContext(ctx, height, f.wallet.contract)
+      val floor = floorOf(f, 1000000L, height, bc)
+      val poor = f.dueBox("a", lastBeat = height - period, value = floor - 1L)
+      f.job.due(poor.toInputUTXO(ctx), height) shouldBe true
+      f.job.build(poor.toInputUTXO(ctx), bc) shouldBe None
+      val exact = f.dueBox("b", lastBeat = height - period, value = floor)
+      successorOf(f.job.build(exact.toInputUTXO(ctx), bc).getOrElse(fail("a box at its floor was declined")))
+        .value shouldBe floor
+    }
+  }
+
+  "minTip" should "keep a job to boxes that offer at least that tip" in {
+    val f = new Fixture()
+    val choosy = new HeartbeatJob(Seq.empty, minTip = tip)
+    f.client.execute { ctx =>
+      choosy.maintains(f.dueBox("a", tip = tip).toInputUTXO(ctx)) shouldBe true
+      choosy.maintains(f.dueBox("b", tip = tip - 1L).toInputUTXO(ctx)) shouldBe false
+      f.job.maintains(f.dueBox("c", tip = 0L).toInputUTXO(ctx)) shouldBe true
+    }
+    HeartbeatJob.Factory.check(play.api.Configuration.from(Map("minTip" -> -1L))) should not be empty
+    HeartbeatJob.Factory.check(play.api.Configuration.from(Map("minTip" -> 5L))) shouldBe empty
+    HeartbeatJob.Factory.check(play.api.Configuration.empty) shouldBe empty
+  }
+
   it should "build nothing for a box whose registers are not a beat" in {
     val f = new Fixture()
     f.client.execute { ctx =>

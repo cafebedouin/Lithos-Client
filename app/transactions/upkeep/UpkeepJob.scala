@@ -13,8 +13,9 @@ import work.lithos.mutations.{Contract, InputUTXO}
  * implementation, one entry in [[UpkeepRegistry.all]], and one config block. A job whose boxes sit
  * at one script extends [[ScriptJob]]; this trait is for one that does not fit that shape.
  *
- * A job spends only the boxes it discovered, with no wallet input and no fee output, and its
- * successor is fixed by the box and the height. "Not yet" belongs in [[due]] and "cannot pay" in
+ * A job must spend only the boxes it discovered, with no wallet input and no fee output, and its
+ * successor is fixed by the box and the height. The source enforces the first against what the job
+ * reported; the rest is enforced by review, and by [[ScriptJob]] for the jobs that extend it. "Not yet" belongs in [[due]] and "cannot pay" in
  * [[build]], since a box `build` declines is held until a scan stops finding it. A job need not
  * count what it builds, because the source sizes and fits every successor, but it is reviewed
  * before it is registered, because the rest is taken on trust.

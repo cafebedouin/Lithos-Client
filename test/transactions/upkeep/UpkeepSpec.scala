@@ -345,7 +345,7 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
 
   private def validated(hocon: String): Option[String] = {
     val config = Configuration(ConfigFactory.parseString(hocon).withFallback(shipped.underlying).resolve())
-    Try(Configs.validateAll(config)) match {
+    Try(Configs.validateAll(config, UpkeepRegistry.checks)) match {
       case Failure(ex: ConfigValidationException) => Some(ex.getMessage)
       case Failure(ex) => throw ex
       case Success(_) => None
@@ -384,6 +384,20 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     validated(s"""stratum.candidate.sources.upkeep.maxBoxesPerJob = 2
                  |stratum.candidate.sources.upkeep.jobs.heartbeat.boxIds = $ids""".stripMargin)
       .getOrElse(fail("three ids were accepted for a cap of two")) should include("at most 2")
+  }
+
+  it should "cap a configured box list at MaxConfiguredBoxes, each being a read on every scan" in {
+    val many = (1 to UpkeepConfig.MaxConfiguredBoxes + 1).map(i => f"$i%064x").map(id => s""""$id"""")
+      .mkString("[", ", ", "]")
+    validated(s"""stratum.candidate.sources.upkeep.maxBoxesPerJob = 4096
+                 |stratum.candidate.sources.upkeep.jobs.heartbeat.boxIds = $many""".stripMargin)
+      .getOrElse(fail("a list past the cap was accepted")) should include(s"at most ${UpkeepConfig.MaxConfiguredBoxes}")
+  }
+
+  it should "run the heartbeat's own check of minTip" in {
+    validated("stratum.candidate.sources.upkeep.jobs.heartbeat.minTip = 1000") shouldBe None
+    validated("stratum.candidate.sources.upkeep.jobs.heartbeat.minTip = -1")
+      .getOrElse(fail("a negative minTip was accepted")) should include("minTip")
   }
 
   it should "accept the two modes and refuse any other" in {

@@ -45,6 +45,17 @@ case class UpkeepConfig(scanIntervalMs: Int, maxBoxesPerJob: Int, retryAfterScan
 
 object UpkeepConfig {
 
+  /**
+   * What validation needs of a registered job: its name, and a check of its own keys that answers
+   * (key relative to the job's block, what is wrong). Passed in by the caller so that config
+   * validation does not depend on the jobs themselves.
+   */
+  final case class JobCheck(name: String, check: Configuration => Seq[(String, String)])
+
+  /** Box ids one job may list in config: each is one read on every scan, so the list is bounded. */
+  final val MaxConfiguredBoxes = 256
+
+
   final val Path = "stratum.candidate.sources.upkeep"
 
   /** Offer what is built to the block: the default, and the only mode that does anything on chain. */
@@ -108,7 +119,7 @@ object UpkeepConfig {
         .getOrElse(Default.verifyWithNode))
   }
 
-  def validate(v: ConfigValidator, config: Configuration): Unit = {
+  def validate(v: ConfigValidator, config: Configuration, jobChecks: Seq[UpkeepConfig.JobCheck]): Unit = {
     v.range(s"$Path.scanIntervalMs", v.int(s"$Path.scanIntervalMs"), 1000, 3600000, "ms between upkeep discovery passes")
     val maxBoxesPerJob = v.range(s"$Path.maxBoxesPerJob", v.int(s"$Path.maxBoxesPerJob"), 1, 4096,
       "box ids one upkeep job may hold between passes").getOrElse(Default.maxBoxesPerJob)
@@ -125,7 +136,7 @@ object UpkeepConfig {
       case Failure(_) =>
         v.problem(s"$Path.jobs", "must be a configuration block, one entry per job")
       case Success(block) => block.foreach { jobs =>
-        val known = transactions.upkeep.UpkeepRegistry.all
+        val known = jobChecks
         jobs.subKeys.toSeq.sorted.foreach { name =>
           val path = s"$Path.jobs.$name"
           Try(config.getOptional(path)(ConfigLoader.configurationLoader)) match {
@@ -164,6 +175,9 @@ object UpkeepConfig {
           v.problem(key, "lists the same box id more than once")
         if (list.size > maxBoxes)
           v.problem(key, s"lists ${list.size} boxes; at most $maxBoxes ($Path.maxBoxesPerJob)")
+        if (list.size > MaxConfiguredBoxes)
+          v.problem(key, s"lists ${list.size} boxes; at most $MaxConfiguredBoxes may be configured, since each is " +
+            "one read on every scan")
       }
     }
 }

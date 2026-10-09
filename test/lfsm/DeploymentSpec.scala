@@ -117,7 +117,7 @@ class DeploymentSpec extends AnyFlatSpec with Matchers with BeforeAndAfterEach {
     r.height shouldEqual d.height
   }
 
-  it should "carry the keys the orchestration hook reads with jq" in {
+  it should "carry the keys other tools read from the descriptor" in {
     val o = new JsonParser().parse(descriptor().toJson).getAsJsonObject
     Seq("collatToken", "litId", "emissionBoxId", "emissionNft", "network")
       .foreach(k => withClue(s"$k: ")(o.has(k) shouldBe true))

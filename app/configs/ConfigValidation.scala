@@ -37,7 +37,12 @@ object Configs {
   def fail(key: String, problem: String): Nothing =
     throw new ConfigValidationException(Seq(ConfigProblem(key, problem)))
 
-  def validateAll(config: Configuration): Unit = {
+  /**
+   * Every config block the client reads, checked at once. `upkeepJobs` is what the upkeep registry
+   * offers (`UpkeepRegistry.checks`), handed in by the caller so that this package depends on no
+   * job; with none given, an enabled upkeep job is refused as unknown.
+   */
+  def validateAll(config: Configuration, upkeepJobs: Seq[UpkeepConfig.JobCheck] = Seq.empty): Unit = {
     val v = new ConfigValidator(config)
     v.bool("stats.enabled")
     val statsRefresh = v.range("stats.refreshIntervalMs", v.int("stats.refreshIntervalMs"),
@@ -203,7 +208,7 @@ object Configs {
       "unconfirmed transactions one rollup transaction may carry into the block")
     v.range("stratum.candidate.sources.rent.blocksPerScan",
       v.int("stratum.candidate.sources.rent.blocksPerScan"), 1, 10000, "blocks read per scan pass")
-    UpkeepConfig.validate(v, config)
+    UpkeepConfig.validate(v, config, upkeepJobs)
     v.bool("stratum.candidate.useTruePropCollection")
     v.bool("stratum.candidate.logTimings")
     v.bool("stratum.candidate.waitForBlockPackage")

@@ -21,17 +21,22 @@ import scala.util.{Failure, Success, Try}
  * Two halves, as in the storage-rent source. A timer asks each job what it maintains and keeps only
  * ids; the candidate path reads the boxes back, has each job build the due ones until the share is
  * spent, and answers through [[transactions.candidate.CandidatePreparation]]. The read-back is the
- * only check that matters: a box that does not come back is spent. The build closes over values it
+ * node's mempool-adjusted view: a box that does not come back is spent, or spent by a pending
+ * transaction, and is dropped until a later scan finds it again. The build closes over values it
  * is handed and reports back by message, so no actor field is read off the mailbox.
  *
- * Never extractive. Nothing here reads pending transactions, so nothing reorders or front-runs
- * anyone, and a job's transaction may only spend the boxes that job discovered.
+ * Never extractive. Nothing here looks at what pending transactions do; the read-back only skips a
+ * box one of them already spends, and a spend that reaches the mempool after the read-back loses
+ * to this miner's own block, as with any block producer. A job's transaction may only spend the
+ * boxes that job reported from discovery, which holds a job to its own word; the shipped job
+ * reports only boxes at its own script and signs with no key and no fee.
  *
  * Holds outlive the actor in a [[UpkeepSource.Memory]], so a restart does not offer the node the
  * same transaction again. With `verifyWithNode`, each admitted successor goes through the node's
- * transaction check in the build `PrepareBlockTxs` starts, off the request path, and the node
- * evaluates it at the next block's height, the candidate's own. In observe mode a request is
- * answered empty at once and the build runs as a task no request waits for.
+ * transaction check in the build `PrepareBlockTxs` starts, off the request path; the node
+ * evaluates it at its own next height, normally the candidate's but later when blocks come fast,
+ * and a refusal for that reason is not remembered. In observe mode a request is answered empty at
+ * once and the build runs as a task no request waits for, holding nothing back.
  */
 class UpkeepSource(nodeContext: NodeContext,
                    upkeepConfig: UpkeepConfig,
@@ -182,7 +187,7 @@ class UpkeepSource(nodeContext: NodeContext,
       val work = offered()
       if (work.nonEmpty) {
         observedThrough = blockHeight
-        Try(Future(advance(work, blockHeight).foreach(report(_, blockHeight)))(candidateWorker))
+        Try(Future(advance(work, blockHeight, remember = false).foreach(report(_, blockHeight)))(candidateWorker))
           .failed.foreach(ex => logger.warn(s"Upkeep could not observe $blockHeight: ${ex.getMessage}"))
       }
     }
@@ -192,11 +197,14 @@ class UpkeepSource(nodeContext: NodeContext,
    *
    * The read, in chunks of [[ReadChunk]], is the node's mempool-adjusted view: an id that does not
    * come back is spent, or spent by a pending transaction, and is skipped. A failed read builds
-   * nothing. A box is sized before it is signed, and building stops at a full share or after
-   * [[MaxRefusedPerBuild]] refusals. The order starts at `blockHeight` modulo the number of boxes,
-   * so a box deferred at the head does not starve the ones behind it.
+   * nothing. A box is sized before it is signed, and building stops at a full share, after
+   * [[MaxRefusedPerBuild]] refusals, or after [[MaxDeferredPerBuild]] successors were signed and
+   * then found not to fit, so a block whose share is nearly spent does not sign every due box for
+   * nothing. The order starts at `blockHeight` modulo the number of boxes, so a box deferred at the
+   * head does not starve the ones behind it. With `remember` off (observe mode) refusals and
+   * exhaustion are logged and not held, so every box stays watched.
    */
-  private def advance(work: Seq[JobWork], blockHeight: Int): Vector[Upkeep.Prepared] =
+  private def advance(work: Seq[JobWork], blockHeight: Int, remember: Boolean = true): Vector[Upkeep.Prepared] =
     Try(nodeContext.getClient.execute { ctx =>
       val ids = work.flatMap(_.offered).distinct
       val live = ids.grouped(ReadChunk).flatMap { chunk =>
@@ -218,9 +226,11 @@ class UpkeepSource(nodeContext: NodeContext,
       var exhausted = Set.empty[String]
       var due = 0
       var deferred = 0
+      var signedForNothing = 0
       val ordered = work.flatMap(item => item.offered.toSeq.sorted.flatMap(byId.get).map(item -> _))
       val queue = rotated(ordered, blockHeight).iterator
-      while (!share.full && refused.size < MaxRefusedPerBuild && queue.hasNext) {
+      while (!share.full && refused.size < MaxRefusedPerBuild && signedForNothing < MaxDeferredPerBuild &&
+        queue.hasNext) {
         val (item, box) = queue.next()
         attempt(bc, item, box, share) match {
           case Attempt.Ready(successor, admitted) =>
@@ -229,9 +239,10 @@ class UpkeepSource(nodeContext: NodeContext,
             logger.debug(s"Upkeep ${successor.label} fits at $blockHeight: " +
               s"${successor.tx.sizeBytes}B, ${successor.tx.cost} cost")
           case Attempt.NotDue => ()
-          case Attempt.Deferred(reason) =>
+          case Attempt.Deferred(reason, built) =>
             due += 1
             deferred += 1
+            if (built) signedForNothing += 1
             logger.debug(s"Upkeep job ${item.job.name} leaves ${box.boxId} for a later block: $reason")
           case Attempt.Exhausted =>
             due += 1
@@ -241,11 +252,14 @@ class UpkeepSource(nodeContext: NodeContext,
             refused += box.boxId
         }
       }
-      if (refused.nonEmpty) self ! Refused(refused)
-      if (exhausted.nonEmpty) self ! Exhausted(exhausted)
+      if (remember && refused.nonEmpty) self ! Refused(refused)
+      if (remember && exhausted.nonEmpty) self ! Exhausted(exhausted)
       if (refused.size >= MaxRefusedPerBuild && queue.hasNext)
         logger.warn(s"Upkeep stopped building at $blockHeight after $MaxRefusedPerBuild refusals; " +
           "the boxes not yet tried wait for a later block")
+      if (signedForNothing >= MaxDeferredPerBuild && queue.hasNext)
+        logger.info(s"Upkeep stopped building at $blockHeight after $MaxDeferredPerBuild successors did not " +
+          "fit the share left; the boxes not yet tried wait for a later block")
 
       val chosen = share.chosen
       if (chosen.nonEmpty || deferred > 0)
@@ -309,9 +323,9 @@ class UpkeepSource(nodeContext: NodeContext,
             case Right(successor) => share.admit(successor) match {
               case Some(admitted) => Attempt.Ready(successor, admitted)
               case None if successor.tx.inputIds.exists(share.claimed.contains) =>
-                Attempt.Deferred("its successor spends a box one already admitted this block spends")
+                Attempt.Deferred("its successor spends a box one already admitted this block spends", built = true)
               case None => Attempt.Deferred(s"built at ${successor.tx.sizeBytes}B and ${successor.tx.cost} cost, " +
-                s"over the ${share.bytes}B and ${share.cost} cost left of the share")
+                s"over the ${share.bytes}B and ${share.cost} cost left of the share", built = true)
             }
           }
       }
@@ -341,7 +355,8 @@ class UpkeepSource(nodeContext: NodeContext,
 
   /**
    * Observe mode's report on one successor: the node's verdict, and what it would have cost and paid.
-   * A refusal is logged and nothing more, because a box set aside would stop being watched.
+   * A refusal is logged and nothing more, as is every refusal in observe mode, because a box set
+   * aside would stop being watched.
    */
   private def report(successor: Upkeep.Prepared, blockHeight: Int): Unit = {
     val offer = s"Upkeep observe at $blockHeight: ${successor.label} as tx ${successor.tx.id}, " +
@@ -386,6 +401,13 @@ object UpkeepSource {
    * every block until the refusals land; the boxes not tried wait for the next block.
    */
   final val MaxRefusedPerBuild = 16
+
+  /**
+   * Successors one build signs and then cannot admit (the share left is too small, or the box is
+   * one an admitted successor spends) before it stops. Sizing before signing catches most of these;
+   * this bounds the rest, since a job may hold thousands of due boxes.
+   */
+  final val MaxDeferredPerBuild = 16
 
   /** Ids per read-back call, so a job holding thousands of boxes never makes one huge request. */
   final val ReadChunk = 256
@@ -490,7 +512,8 @@ object UpkeepSource {
     final case class Ready(successor: Upkeep.Prepared, share: Upkeep.Share) extends Attempt
     case object NotDue extends Attempt
     /** Due, but not this block: nothing is wrong with the box, the share has no room for it. */
-    final case class Deferred(reason: String) extends Attempt
+    /** `built` when the successor was signed before it was found not to fit, which the build counts. */
+    final case class Deferred(reason: String, built: Boolean = false) extends Attempt
     /** Due, and the job says the box cannot pay for its successor. */
     case object Exhausted extends Attempt
     final case class Refused(reason: String) extends Attempt

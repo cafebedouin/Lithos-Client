@@ -37,7 +37,11 @@ final case class Successor(outputs: Seq[UTXO],
  * box. Such a job is its rule: the script, when a box is due, the successor, and which boxes go
  * first. Everything around the rule is written once here rather than in every job:
  *
- *  - Discovery. On an indexed node, every confirmed box at the script, lowest [[priority]] first.
+ *  - Discovery. On an indexed node, the first [[ScriptJob.MaxPages]] pages of [[ScriptJob.PageSize]]
+ *    confirmed boxes at the script in the index's ascending order (1,000 boxes), then lowest
+ *    [[priority]] first among those. Boxes beyond that window are not seen on that pass, so a
+ *    script anyone may pay into can be crowded by older boxes whatever their due height; the
+ *    configured list below is the operator's guarantee for the boxes that matter.
  *    On every node, indexed or not, the ids under `jobs.<name>.boxIds`, each read from the UTXO set
  *    with one `boxById` call, so an unconfirmed box is never spent without its parent. That list is
  *    not a fallback: its boxes come first and are never cut. A box is kept only if it sits at the

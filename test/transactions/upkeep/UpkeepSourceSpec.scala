@@ -336,6 +336,32 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     f.memory.refusedIds should have size (UpkeepSource.MaxRefusedPerBuild + 4).toLong
   }
 
+  /** Sizing catches most misfits before signing; what it misses must not cost a signing per due box. */
+  it should "stop after MaxDeferredPerBuild successors were signed and did not fit, and refuse none" in {
+    val probe = new Fixture()
+    val sample = probe.box("a")
+    probe.job.behaviour = FakeJob.Padded(20)
+    val (heavy, floorCost) = probe.nodeContext.getClient.execute { ctx =>
+      val bc = BuildContext(ctx, ctx.getHeight + 1, probe.wallet.contract)
+      val input = sample.toInputUTXO(ctx)
+      (Upkeep.member(probe.job.build(input, bc).get.tx, probe.job.name, input, bc.params).cost,
+        Upkeep.floor(input, bc.params)._2)
+    }
+    heavy should be > floorCost
+
+    // Every box fits by its floor and no built successor fits: each is signed, then deferred.
+    val f = new Fixture(limits = defaultLimits.copy(maxTxs = 100, maxCost = (floorCost + heavy) / 2))
+    val boxes = (0 until UpkeepSource.MaxDeferredPerBuild + 4).map(i => f.box(s"d$i"))
+    f.job.discovered = boxes.map(_.boxId)
+    f.live = boxes
+    f.job.behaviour = FakeJob.Padded(20)
+
+    f.scanUntil(f.job.builds.get >= 1) shouldBe empty
+    f.job.builds.get shouldBe UpkeepSource.MaxDeferredPerBuild
+    f.memory.refusedIds shouldBe empty
+    f.memory.exhaustedIds shouldBe empty
+  }
+
   it should "treat a build that throws as refused" in {
     val f = new Fixture()
     val a = f.box("a")
@@ -548,6 +574,20 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     awaitAssert(f.checkCount shouldBe checks + 1, 20.seconds, 100.millis)
     Thread.sleep(300)
     f.checkCount shouldBe checks + 1
+  }
+
+  /** Observe mode watches; a build that fails is logged, and the box is still built next block. */
+  it should "hold nothing back when a build fails" in {
+    val f = new Fixture(mode = UpkeepConfig.Observe)
+    val a = f.box("a")
+    f.job.discovered = Seq(a.boxId)
+    f.live = Seq(a)
+    f.job.behaviour = FakeJob.Throw
+    f.scanUntil(f.job.builds.get >= 1) shouldBe empty
+    f.request() shouldBe empty
+    awaitAssert(f.job.builds.get should be >= 2, 20.seconds, 100.millis)
+    f.memory.refusedIds shouldBe empty
+    f.memory.exhaustedIds shouldBe empty
   }
 
   /** A refusal there is the finding observe mode exists to report, not a reason to stop watching. */

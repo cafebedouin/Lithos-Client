@@ -53,7 +53,7 @@ final case class DeploymentIds(lit: ErgoId,
       Seq(s"mdGenesisId=$mdGenesisId", s"mdGenesisHeight=$mdGenesisHeight",
         s"fpControlAddress=$fpControlAddress")).mkString(";")
 
-  /** Written into the descriptor object `out`, under the keys a shell hook reads with `jq`. */
+  /** Written into the descriptor object `out`, under [[DeploymentIds.Keys]]. */
   def writeTo(out: JsonObject): JsonObject = {
     tokens.foreach { case (k, v) => out.addProperty(k, v.toString) }
     out.addProperty(DeploymentIds.Keys.MdGenesisId, mdGenesisId)
@@ -65,7 +65,7 @@ final case class DeploymentIds(lit: ErgoId,
 
 object DeploymentIds {
 
-  /** Descriptor keys. Named for the shell hook, which reads `collatToken`, `litId` and the box ids. */
+  /** Descriptor keys, stable so that other tools can read `collatToken`, `litId` and the box ids. */
   object Keys {
     final val Lit = "litId"
     final val EmissionNft = "emissionNft"
@@ -293,7 +293,6 @@ object DeploymentDescriptor {
  * Installed once at startup, before anything compiles (`NodeConfig` does it). A second install with
  * different ids is refused rather than applied, because contracts already compiled and boxes already
  * found under the first set would silently disagree with everything compiled after.
- * (`override` would be the natural name, but it is a Scala keyword.)
  */
 object Deployment {
 

@@ -22,8 +22,8 @@ final case class JobFactory(name: String,
 
 /**
  * Every upkeep job this client knows, in the order their work is offered to a block. Config can
- * only turn on a job registered here, so no one runs maintenance that was never reviewed, and a job
- * name that is enabled and unknown is refused at startup.
+ * only turn on a job registered here, so every job that runs is code that shipped with this client,
+ * and a job name that is enabled and unknown is refused at startup.
  */
 object UpkeepRegistry {
 
@@ -31,6 +31,9 @@ object UpkeepRegistry {
 
   /** The names [[all]] answers to, in the same order. Validation checks config against this. */
   def names: Seq[String] = all.map(_.name)
+
+  /** What config validation needs of every job, handed to it so `configs` depends on no job. */
+  def checks: Seq[UpkeepConfig.JobCheck] = all.map(f => UpkeepConfig.JobCheck(f.name, f.check))
 
   /**
    * The jobs config turns on, made from their blocks, out of `factories`. Off is the default for

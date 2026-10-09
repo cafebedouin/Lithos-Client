@@ -7,11 +7,13 @@
 
   // THE RULE, IN WORDS
   // The box is due once HEIGHT reaches the last beat (R4) plus the period (R5); the sum is taken in
-  // Long, so no period overflows into a box that is due every block. A spend of a due box must
+  // Long, so a period near the Int maximum makes a box that is never due rather than one that fails
+  // to evaluate; either way such a box never advances. A spend of a due box must
   // recreate it as OUTPUTS(0): the same script, the same tokens, R4 set to this block's height, R5
   // and R6 unchanged, a creation height of this block, and a value of at least the box's value less
-  // the tip (R6). The box must be INPUTS(0), so one transaction advances one box: two boxes with the
-  // same terms cannot share one successor while the spender keeps the second whole. The period must
+  // the tip (R6). The box must be INPUTS(0), so one transaction advances at most one due-job box
+  // (its other inputs are unconstrained): two boxes with the same terms cannot share one successor
+  // while the spender keeps the second whole. The period must
   // be positive and the tip not negative, or the box never advances. Whatever the successor does not
   // keep, which is at most the tip, belongs to the executor, and where it goes is not constrained.
   // The fresh creation height is what makes a beat reset the storage-rent clock: a successor stamped
@@ -32,6 +34,12 @@
   // tips wanted and walks away. Tokens stay with the box through every beat and leave it only with
   // storage rent. A tip at or above the box's value means the creator offered the whole box: the
   // successor need keep nothing the script asks for, only what consensus asks of any box.
+  //
+  // WHAT THE SCRIPT LEAVES FREE
+  // Only OUTPUTS(0)'s script, tokens, R4 to R6, creation height and value are constrained. Its R7 to
+  // R9, every other output, the other inputs and the data inputs are free: an executor may attach
+  // registers to the successor (raising its minimum value until the next beat drops them) and may
+  // put the tip anywhere, including a fee.
 
   // ASSUMPTIONS
   // None. The contract takes no constants and reads no other box.

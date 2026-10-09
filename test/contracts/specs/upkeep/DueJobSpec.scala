@@ -138,9 +138,9 @@ class DueJobSpec extends AnyPropSpec with ContractSpecBase {
   }
 
   /**
-   * R4 + R5 is taken in Long. In Int, a period near `Int.MaxValue` would wrap the sum negative and
-   * make the box due every block, or fail the script outright; in Long the sum is simply a height
-   * no chain reaches, so the box is never due and the spend is refused for that reason alone.
+   * R4 + R5 is taken in Long, so a period near `Int.MaxValue` makes a height no chain reaches and
+   * the box is never due. The property shows the refusal; it cannot tell a Long sum from an Int one
+   * (an Int overflow would fail the script too), so what it holds is that such a box is refused.
    */
   property("due: a box whose R4 + R5 passes Int.MaxValue is not due") {
     withCtx { ctx =>
@@ -156,13 +156,24 @@ class DueJobSpec extends AnyPropSpec with ContractSpecBase {
 
   // ─── the box's own terms ──────────────────────────────────────────────────
 
-  /** Due every block under the old rule; a period of zero is no heartbeat, and `sane` refuses it. */
+  /** A period of zero would make the box due every block; it is no heartbeat, and `sane` refuses it. */
   property("sane: a box with a period of zero is refused") {
     withCtx { ctx =>
       val b = beat(ctx)
       val box = standing(ctx, lastBeat = b.lastBeat, period = 0, tip = tip)
       rejectsAtSigning(b.prover, beatTx(b)(
         outputs = Seq(b.successor.withRegNum(5, ErgoValue.of(0)), b.tipOut),
+        inputs = Seq(box)))
+    }
+  }
+
+  /** A negative tip is nonsense the box would carry forever; `sane` refuses it. */
+  property("sane: a box with a negative tip is refused") {
+    withCtx { ctx =>
+      val b = beat(ctx)
+      val box = standing(ctx, lastBeat = b.lastBeat, period = period, tip = -1L)
+      rejectsAtSigning(b.prover, beatTx(b)(
+        outputs = Seq(b.successor.withRegNum(6, ErgoValue.of(-1L))),
         inputs = Seq(box)))
     }
   }
