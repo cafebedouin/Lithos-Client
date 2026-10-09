@@ -112,8 +112,10 @@ class UpkeepSource(nodeContext: NodeContext,
     // node recovers.
     case Scanned(Success(pass)) =>
       scanning = false
-      tracked ++= pass
-      val known = tracked.values.flatten.toSet
+      tracked ++= pass.map { case (job, found) => job -> found.kept }
+      // Holds are kept for every box a pass found, kept under the cap or not: a box the cap left out
+      // because it is held must stay held, or it would win the cap again next pass.
+      val known = tracked.values.flatten.toSet ++ pass.values.flatMap(_.found)
       val retried = memory.passed(known)
       if (retried.nonEmpty)
         logger.info(s"Upkeep offers ${retried.size} refused boxes again after ${memory.retryAfterScans} " +
@@ -410,20 +412,26 @@ class UpkeepSource(nodeContext: NodeContext,
   /**
    * One pass over every job. A job that throws is logged and left out of the pass, so one
    * protocol's node trouble cannot stop the others; the actor keeps what that job last found.
+   * Boxes the memory holds as unable to pay are left out of the capped part of what is kept, so
+   * that they do not fill the cap and keep payable boxes behind them out; they are still reported
+   * as found, so their holds survive the pass. A refused box stays tracked: it sits out a bounded
+   * number of passes and is then tried again from where it is.
    */
-  private def scan(): Map[String, Set[String]] =
+  private def scan(): Map[String, Pass] =
     nodeContext.getClient.execute { ctx =>
       val height = ctx.getHeight
+      val held = memory.exhaustedIds
       jobs.flatMap { job =>
         Try(job.discover(ctx, nodeApi, height)) match {
           // The ids the operator listed are kept whatever their number; the cap cuts only the
           // rest, which a job returns in its own priority order.
           case Success(found) =>
             val (listed, rest) = found.distinct.partition(job.configured.contains)
-            if (rest.size > upkeepConfig.maxBoxesPerJob)
-              logger.warn(s"Upkeep job ${job.name} found ${rest.size} boxes beyond its configured ones; " +
+            val offerable = rest.filterNot(held.contains)
+            if (offerable.size > upkeepConfig.maxBoxesPerJob)
+              logger.warn(s"Upkeep job ${job.name} found ${offerable.size} boxes beyond its configured ones; " +
                 s"keeping the first ${upkeepConfig.maxBoxesPerJob} (stratum.candidate.sources.upkeep.maxBoxesPerJob)")
-            Some(job.name -> (listed ++ rest.take(upkeepConfig.maxBoxesPerJob)).toSet)
+            Some(job.name -> Pass((listed ++ offerable.take(upkeepConfig.maxBoxesPerJob)).toSet, found.toSet))
           case Failure(ex) =>
             logger.warn(s"Upkeep job ${job.name} failed to discover its boxes, keeping the last pass: ${ex.getMessage}")
             None
@@ -527,7 +535,7 @@ object UpkeepSource {
   private[upkeep] case object ScanTick
 
   /** What one pass found per job; a job whose discovery failed is absent. */
-  private[upkeep] final case class Scanned(result: Try[Map[String, Set[String]]])
+  private[upkeep] final case class Scanned(result: Try[Map[String, Pass]])
 
   /** Boxes a build found already spent, so they stop being offered. */
   private[upkeep] final case class Spent(ids: Set[String])
@@ -535,6 +543,9 @@ object UpkeepSource {
   /** Boxes whose builds were refused, so they sit out passes before they are offered again. */
   /** An observe task has finished, so the next height may start one. */
   private[upkeep] case object Observed
+
+  /** One job's pass: the ids kept under the cap, and every id the pass found, held ones included. */
+  private[upkeep] final case class Pass(kept: Set[String], found: Set[String])
 
   private[upkeep] final case class Refused(ids: Set[String])
 

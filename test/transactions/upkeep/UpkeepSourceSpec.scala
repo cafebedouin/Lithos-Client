@@ -302,6 +302,23 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     f.memory.refusedIds shouldBe empty
   }
 
+  /** A held box must not fill the cap and keep a payable box behind it out, pass after pass. */
+  it should "keep held boxes out of the cap, and keep their holds" in {
+    val f = new Fixture(maxBoxes = 1)
+    val poor = f.box("a")
+    val good = f.box("b")
+    f.job.discovered = Seq(poor, good).map(_.boxId)   // discovery order: the poor box first, so the cap of one takes it
+    f.live = Seq(poor, good)
+    f.job.behaviour = FakeJob.CannotPayAny(Set(poor.boxId))
+
+    f.scanUntil(f.job.builds.get >= 1) shouldBe empty
+    f.memory.exhaustedIds shouldBe Set(poor.boxId)
+    // the next pass leaves the held box out of the cap, so the payable one is tracked and built
+    f.scanUntil(f.job.builds.get >= 2) should have size 1
+    f.memory.exhaustedIds shouldBe Set(poor.boxId)
+    f.request() should have size 1
+  }
+
   /** Cannot pay does not pass with time, so the retry rule that frees a refused box does not apply. */
   it should "not offer an exhausted box again after retryAfterScans passes" in {
     val f = new Fixture(retryAfterScans = 2)
