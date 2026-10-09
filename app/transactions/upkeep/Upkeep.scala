@@ -2,7 +2,6 @@ package transactions.upkeep
 
 import node.NodeApi
 import node.model.{NodeTransaction, Paging}
-import node.rest.NodeCodecs
 import org.ergoplatform.appkit.impl.SignedTransactionImpl
 import org.ergoplatform.appkit.{BlockchainParameters, SignedTransaction}
 import org.ergoplatform.wallet.interpreter.ErgoInterpreter
@@ -239,21 +238,20 @@ object Upkeep {
   }
 
   /**
-   * The source's share in opportunistic mode. The block holds this client's package (`pkg`, its
-   * `blockShare` of `block`) and, beside it, whatever the node fills from the mempool. The share
-   * grows to the whole package only when the mempool's demand fits in the rest of the block on
-   * both bytes and cost, so no transaction already waiting is displaced by the growth; the package
-   * pass in the candidate builder still fits every source into `pkg` after this. Otherwise the
-   * configured share stands, as it does when the package is no larger than it: never fewer slots,
-   * bytes or cost than configured, and the count raised to the larger of the configured count and
-   * `maxTxs`.
+   * The source's share in opportunistic mode. The block holds this client's package share and,
+   * beside it, `rest`, which the node fills from the mempool. When the mempool's demand fits in
+   * `rest` with room to spare on both bytes and cost, by the node's figures at the read, the share
+   * keeps its configured bytes and cost and takes up to the larger of the configured count and
+   * `maxTxs` transactions in them; otherwise the configured share stands. A demand that reaches
+   * `rest` exactly does not fit: [[demand]] saturates there, so that figure means "at least this",
+   * and the rest also carries the node's own emission and fee transactions, which no read counts.
+   * The growth is in the count only, so the bytes and cost the operator set bound upkeep as in
+   * fixed mode, and the candidate builder's per-source and package passes stand unchanged.
    */
-  def opportunistic(configured: Share, pkg: CandidateBudget, block: CandidateBudget, demandBytes: Long,
-                    demandCost: Long, maxTxs: Int): Share = {
-    val fits = demandBytes <= block.maxBytes - pkg.maxBytes && demandCost <= block.maxCost - pkg.maxCost
-    if (fits && pkg.maxBytes > configured.bytes && pkg.maxCost > configured.cost)
-      Share(math.max(configured.slots, maxTxs), pkg.maxBytes, pkg.maxCost)
+  def opportunistic(configured: Share, rest: CandidateBudget, demandBytes: Long, demandCost: Long,
+                    maxTxs: Int): Share =
+    if (demandBytes < rest.maxBytes && demandCost < rest.maxCost)
+      configured.copy(slots = math.max(configured.slots, maxTxs))
     else configured
-  }
 
 }

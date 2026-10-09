@@ -48,7 +48,7 @@ final class FakeJob(wallet: NodeWallet, val name: String = "fake") extends Upkee
   }
 
   /** Declared only: what a build actually pays stays [[FakeJob.Tip]], since only the order is under test. */
-  override def expectedRevenue(box: InputUTXO): Long = declaredTips.getOrElse(box.id.toString, 0L)
+  override def expectedRevenue(box: InputUTXO, bc: BuildContext): Long = declaredTips.getOrElse(box.id.toString, 0L)
 
   override def build(box: InputUTXO, bc: BuildContext): Option[UpkeepJob.Built] = {
     builds.incrementAndGet()

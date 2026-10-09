@@ -182,29 +182,26 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
   private val configuredShare = Upkeep.Share(slots = 5, bytes = 1000L, cost = 10000L)
   private val packageBudget = CandidateBudget(maxBytes = 100000L, maxCost = 1000000L)
 
-  /** A block twice the package: the mempool has the other half beside a full package. */
-  private val blockBudget = CandidateBudget(maxBytes = 200000L, maxCost = 2000000L)
+  /** What the block has beside this client's package share: where the mempool's transactions go. */
+  private val rest = CandidateBudget(maxBytes = 100000L, maxCost = 1000000L)
 
   "An opportunistic share" should "keep the configured share when the waiting transactions do not fit beside a full package" in {
-    Upkeep.opportunistic(configuredShare, packageBudget, blockBudget, 200000L, 2000000L, maxTxs = 20) shouldBe configuredShare
-    Upkeep.opportunistic(configuredShare, packageBudget, blockBudget, 100001L, 0L, maxTxs = 20) shouldBe configuredShare
-    Upkeep.opportunistic(configuredShare, packageBudget, blockBudget, 0L, 1000001L, maxTxs = 20) shouldBe configuredShare
+    Upkeep.opportunistic(configuredShare, rest, 200000L, 2000000L, maxTxs = 20) shouldBe configuredShare
+    Upkeep.opportunistic(configuredShare, rest, 100001L, 0L, maxTxs = 20) shouldBe configuredShare
+    Upkeep.opportunistic(configuredShare, rest, 0L, 1000001L, maxTxs = 20) shouldBe configuredShare
+    // reaching the rest exactly is "at least this", the figure a saturated read gives: no growth
+    Upkeep.opportunistic(configuredShare, rest, 100000L, 1000000L, maxTxs = 20) shouldBe configuredShare
   }
 
-  it should "grow to the whole package when the waiting transactions fit in the rest of the block" in {
-    Upkeep.opportunistic(configuredShare, packageBudget, blockBudget, 0L, 0L, maxTxs = 20) shouldBe
-      Upkeep.Share(slots = 20, bytes = 100000L, cost = 1000000L)
-    Upkeep.opportunistic(configuredShare, packageBudget, blockBudget, 100000L, 1000000L, maxTxs = 20) shouldBe
-      Upkeep.Share(slots = 20, bytes = 100000L, cost = 1000000L)
-  }
-
-  it should "keep the configured share when the package is no larger than it" in {
-    val small = CandidateBudget(maxBytes = 1000L, maxCost = 10000L)
-    Upkeep.opportunistic(configuredShare, small, blockBudget, 0L, 0L, maxTxs = 20) shouldBe configuredShare
+  it should "raise the count to the cap, within the configured bytes and cost, when they fit with room to spare" in {
+    Upkeep.opportunistic(configuredShare, rest, 0L, 0L, maxTxs = 20) shouldBe
+      Upkeep.Share(slots = 20, bytes = 1000L, cost = 10000L)
+    Upkeep.opportunistic(configuredShare, rest, 99999L, 999999L, maxTxs = 20) shouldBe
+      Upkeep.Share(slots = 20, bytes = 1000L, cost = 10000L)
   }
 
   it should "never take fewer slots than configured, whatever the cap" in {
-    Upkeep.opportunistic(configuredShare, packageBudget, blockBudget, 0L, 0L, maxTxs = 2).slots shouldBe 5
+    Upkeep.opportunistic(configuredShare, rest, 0L, 0L, maxTxs = 2).slots shouldBe 5
   }
 
   private def waiting(n: Int, size: Option[Int], cost: Option[Long]): NodeTransaction =
@@ -409,7 +406,7 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     val limits = CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 5)
     UpkeepConfig.Default.allowance(limits) shouldBe limits
     val widened = UpkeepConfig.Default.copy(space = UpkeepConfig.Opportunistic, opportunisticMaxTxs = 12).allowance(limits)
-    widened shouldBe limits.copy(maxTxs = 12, maxBytes = Long.MaxValue, maxCost = Long.MaxValue)
+    widened shouldBe limits.copy(maxTxs = 12)
     UpkeepConfig.Default.copy(space = UpkeepConfig.Opportunistic, opportunisticMaxTxs = 2)
       .allowance(limits).maxTxs shouldBe 5
     UpkeepConfig.Default.copy(space = UpkeepConfig.Opportunistic).allowance(limits.copy(maxTxs = 0)) shouldBe

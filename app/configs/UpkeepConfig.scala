@@ -41,10 +41,11 @@ import scala.util.{Failure, Success, Try}
  *                        with it, so one bad successor would otherwise cost the block the work of
  *                        every source.
  * @param space           `fixed` holds the source to its configured share; `opportunistic` lets it
- *                        grow, block by block, to the whole package share when the mempool's own
- *                        demand fits in the rest of the block beside it. Fixed by default, because
- *                        whether fee-less work should take space at all beyond what the operator
- *                        set is a policy choice.
+ *                        take, block by block, more transactions within its configured bytes and
+ *                        cost when the mempool's own demand fits in the rest of the block beside
+ *                        this client's package share. Fixed by default, because whether fee-less
+ *                        work should take space at all beyond what the operator set is a policy
+ *                        choice.
  * @param opportunisticMaxTxs the most successors an opportunistic share admits however empty the
  *                        block, so a runaway job cannot fill one; the configured count wins if it
  *                        is larger.
@@ -63,16 +64,16 @@ case class UpkeepConfig(scanIntervalMs: Int, maxBoxesPerJob: Int, retryAfterScan
 
   /**
    * What the candidate builder lets this source contribute, given its configured `limits`. The
-   * builder bounds every source's answer by its limits again, so an opportunistic share it did not
-   * know of would be cut back to the configured one there. Opportunistic, the count may reach
-   * [[opportunisticMaxTxs]] and bytes and cost are left to the package budget, which the builder
-   * applies to every source together after this; fixed, the limits are returned unchanged. A
-   * configured `maxTxs` of 0 is the builder's sign never to ask the source, so it is kept too.
+   * builder bounds every source's answer by its limits again, so an opportunistic count it did not
+   * know of would be cut back to the configured one there. Opportunistic, the count may reach the
+   * larger of `maxTxs` and [[opportunisticMaxTxs]]; the bytes and cost stay as configured, so the
+   * builder's bounds on them stand. The package-wide count, the sum of every source's `maxTxs`, rises
+   * with it. Fixed, the limits are returned unchanged. A configured `maxTxs` of 0 is the builder's
+   * sign never to ask the source, so it is kept too.
    */
   def allowance(limits: CandidateSourceConfig): CandidateSourceConfig =
     if (!opportunistic || limits.maxTxs <= 0) limits
-    else limits.copy(maxTxs = math.max(limits.maxTxs, opportunisticMaxTxs),
-      maxBytes = Long.MaxValue, maxCost = Long.MaxValue)
+    else limits.copy(maxTxs = math.max(limits.maxTxs, opportunisticMaxTxs))
 }
 
 object UpkeepConfig {
@@ -97,10 +98,13 @@ object UpkeepConfig {
 
   final val Modes: Seq[String] = Seq(Candidate, Observe)
 
-  /** The configured share, every block: the default, and the behaviour before `space` existed. */
+  /** The configured share, every block: the default, and the share before `space` existed. */
   final val Fixed = "fixed"
 
-  /** The configured share, or what the mempool would leave of the package share if that is larger. */
+  /**
+   * The configured share, with the count raised to the cap when the mempool's demand fits in the rest
+   * of the block beside this client's package share.
+   */
   final val Opportunistic = "opportunistic"
 
   final val Spaces: Seq[String] = Seq(Fixed, Opportunistic)

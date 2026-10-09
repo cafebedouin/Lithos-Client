@@ -238,13 +238,14 @@ class UpkeepSource(nodeContext: NodeContext,
    * nothing. A box is sized before it is signed, and building stops at a full share, after
    * [[MaxRefusedPerBuild]] refusals, or after [[MaxDeferredPerBuild]] successors were signed and
    * then found not to fit, so a block whose share is nearly spent does not sign every due box for
-   * nothing. Boxes go in order of what their successors are expected to pay per byte, then per
+   * nothing. The box at the head of the height rotation (the boxes in id order, started at
+   * `blockHeight` modulo their number) goes first, so every box reaches the head once per cycle and
+   * none waits forever; the rest go in order of what their successors would pay per byte, then per
    * unit of cost, so the share is spent on the best-paying work first and a full share stops the
-   * build rather than leaving the best box untried; a cheaper due box waits while dearer ones are
-   * due, which is the point. Only among boxes worth the same does the order start at `blockHeight`
-   * modulo their number, so that a box deferred at the head does not starve the ones behind it.
-   * With `remember` off (observe mode) refusals and exhaustion are logged and not held, so every
-   * box stays watched.
+   * build rather than leaving the best box untried, and a lower-paying due box waits for as long as
+   * higher-paying ones are due. Among boxes worth the same the rotation's order is kept. With
+   * `remember` off (observe mode) refusals and exhaustion are logged and not held, so every box
+   * stays watched.
    */
   private def advance(work: Seq[JobWork], blockHeight: Int, remember: Boolean = true): Vector[Upkeep.Prepared] =
     Try(nodeContext.getClient.execute { ctx =>
@@ -277,9 +278,10 @@ class UpkeepSource(nodeContext: NodeContext,
       // maxBoxesPerJob boxes per job, each a small parse.
       val ordered = work.flatMap(item => item.offered.toSeq.sorted.flatMap(byId.get)
         .map(box => (item, box, Try(box.toInputUTXO(ctx)))))
-      val queue = Upkeep.byWorth(rotated(ordered, blockHeight)) { case (item, _, parsed) =>
+      val inTurn = rotated(ordered, blockHeight)
+      val queue = (inTurn.take(1) ++ Upkeep.byWorth(inTurn.drop(1)) { case (item, _, parsed) =>
         worth(bc, item.job, parsed)
-      }.iterator
+      }).iterator
       while (!share.full && refused.size < MaxRefusedPerBuild && signedForNothing < MaxDeferredPerBuild &&
         queue.hasNext) {
         val (item, box, parsed) = queue.next()
@@ -358,24 +360,28 @@ class UpkeepSource(nodeContext: NodeContext,
   }
 
   /**
-   * The share for one block in opportunistic mode: the configured one, or the whole package share
-   * when the mempool's demand fits in the rest of the block beside it. The package share is worked
-   * out as the candidate builder works it, from the node's parameters for this block and
-   * `blockShare`. A mempool that cannot be read or weighed leaves the configured share, which is
-   * what fixed mode takes anyway.
+   * The share for one block in opportunistic mode: the configured one, or the configured bytes and
+   * cost with the count raised to the cap, when the mempool's demand fits in the rest of the block
+   * beside this client's whole package share. The package share is worked out as the candidate
+   * builder works it, from the node's parameters for this block and `blockShare`; the mempool is
+   * read only up to that rest, since nothing past it changes the answer, and not at all when there
+   * is no rest. A mempool that cannot be read or weighed leaves the configured share, which is what
+   * fixed mode takes anyway.
    */
   private def opportunisticShare(bc: BuildContext, configured: Upkeep.Share, blockHeight: Int): Upkeep.Share = {
     val block = CandidateBudget(bc.params.getMaxBlockSize.toLong, bc.params.getMaxBlockCost.toLong)
     val pkg = CandidateBudget.of(block.maxBytes, block.maxCost, blockShare)
-    Upkeep.demand(nodeApi, block) match {
+    val rest = block.less(pkg.maxBytes, pkg.maxCost)
+    if (rest.maxBytes <= 0L || rest.maxCost <= 0L) configured
+    else Upkeep.demand(nodeApi, rest) match {
       case Failure(ex) =>
         logger.warn(s"Upkeep could not read the mempool at $blockHeight, keeping the configured share: ${ex.getMessage}")
         configured
       case Success((bytes, cost)) =>
-        val share = Upkeep.opportunistic(configured, pkg, block, bytes, cost, upkeepConfig.opportunisticMaxTxs)
-        logger.debug(s"Upkeep at $blockHeight: the mempool claims ${bytes}B and $cost cost of the block's " +
-          s"${block.maxBytes}B and ${block.maxCost}, the package being ${pkg.maxBytes}B and ${pkg.maxCost}; " +
-          s"share txs=${share.slots}, bytes=${share.bytes}, cost=${share.cost}")
+        val share = Upkeep.opportunistic(configured, rest, bytes, cost, upkeepConfig.opportunisticMaxTxs)
+        logger.debug(s"Upkeep at $blockHeight: the mempool claims ${bytes}B and $cost cost of the ${rest.maxBytes}B " +
+          s"and ${rest.maxCost} the block has beside the package; share txs=${share.slots}, bytes=${share.bytes}, " +
+          s"cost=${share.cost}")
         share
     }
   }
@@ -389,7 +395,7 @@ class UpkeepSource(nodeContext: NodeContext,
     parsed.flatMap { input =>
       Try {
         val (bytes, cost) = Upkeep.floor(input, bc.params)
-        Upkeep.Worth(job.expectedRevenue(input), bytes, cost)
+        Upkeep.Worth(job.expectedRevenue(input, bc), bytes, cost)
       }
     }.getOrElse(Upkeep.Worth.Unknown)
 

@@ -614,20 +614,28 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     UpkeepSource.rotated(Seq.empty[Int], 7) shouldBe empty
   }
 
-  /** Boxes of one shape, so tip per byte orders as the tip does, at every rotation. */
-  it should "admit the highest tips per byte, and build only those" in {
+  /**
+   * Boxes of one shape, so tip per byte orders as the tip does. The box at the head of the height
+   * rotation goes first whatever it pays, then the highest tip per byte of the rest, so with two
+   * slots the cheapest box is built only at the height that puts it at the head.
+   */
+  it should "admit the rotation's head and then the highest tips per byte, and build only those" in {
     val f = new Fixture(limits = defaultLimits.copy(maxTxs = 2))
     val Seq(low, high, middle) = Seq("a", "b", "c").map(f.box)
     f.job.discovered = Seq(low, high, middle).map(_.boxId)
     f.live = Seq(low, high, middle)
-    f.job.declaredTips = Map(low.boxId -> 1000L, high.boxId -> 3000L, middle.boxId -> 2000L)
+    val tips = Map(low.boxId -> 1000L, high.boxId -> 3000L, middle.boxId -> 2000L)
+    f.job.declaredTips = tips
     f.scanUntil(f.readCount > 0)
 
+    val inIdOrder = Seq(low, high, middle).map(_.boxId).sorted
     Seq(700, 701, 702).foreach { height =>
+      val head = inIdOrder(Math.floorMod(height, 3))
+      val best = (tips - head).maxBy(_._2)._1
       val before = f.job.builds.get
       val bundles = f.request(height)
-      bundles.flatMap(_.members.flatMap(_.inputIds)).toSet shouldBe Set(high.boxId, middle.boxId)
-      withClue("the cheapest box was built though the share was full: ") { f.job.builds.get - before shouldBe 2 }
+      bundles.flatMap(_.members.flatMap(_.inputIds)).toSet shouldBe Set(head, best)
+      withClue("a box was built though the share was full: ") { f.job.builds.get - before shouldBe 2 }
     }
   }
 
@@ -647,10 +655,13 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
 
   // ─── the opportunistic share ──────────────────────────────────────────────
 
-  /** One slot configured, room for three opportunistic ones, and four due boxes to fill them. */
+  /**
+   * One slot configured, room for three opportunistic ones, and four due boxes to fill them; the
+   * package is half the block, so the mempool has the other half to fit in.
+   */
   private class Space(space: String = UpkeepConfig.Opportunistic)
     extends Fixture(limits = defaultLimits.copy(maxTxs = 1, maxBytes = 4096L, maxCost = 200000L),
-      space = space, opportunisticMaxTxs = 3) {
+      space = space, opportunisticMaxTxs = 3, blockShare = 0.5) {
     val boxes: Seq[NodeBox] = Seq("a", "b", "c", "d").map(box)
     job.discovered = boxes.map(_.boxId)
     live = boxes
@@ -660,11 +671,18 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
   private val crowd = NodeTransaction(id("crowd"), Seq.empty, Seq.empty, Seq.empty,
     size = Some(Int.MaxValue / 2), cost = Some(Long.MaxValue / 4))
 
-  "The opportunistic share" should "grow into an empty mempool's remainder, up to opportunisticMaxTxs" in {
+  "The opportunistic share" should "take up to opportunisticMaxTxs transactions when the mempool is empty" in {
     val f = new Space()
     val bundles = f.scanUntil(f.readCount > 0)
     bundles should have size 3
     f.mempoolReads.get should be > 0
+  }
+
+  it should "take up to the cap when what is waiting fits in the block beside the package" in {
+    val f = new Space()
+    f.mempool = Success(Seq(NodeTransaction(id("small"), Seq.empty, Seq.empty, Seq.empty, size = Some(1000), cost = Some(10000L))))
+    val bundles = f.scanUntil(f.readCount > 0)
+    bundles should have size 3
   }
 
   it should "keep the configured share when the waiting transactions do not fit beside a full package" in {
