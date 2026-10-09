@@ -7,8 +7,15 @@ inside this miner's own block candidate, with no key and no fee. It is a registr
 reviewed description of one protocol's boxes — which ones it maintains, when one is due, and what its
 successor is — and the source around it owns everything else: a discovery timer, revalidation by reading
 the boxes back before a block is built, sizing and fitting to the source's share, a memory of refusals,
-and the prepare/request/drop protocol every candidate source speaks. A new protocol is one implementation
-of `UpkeepJob` and one config block. The first job, `heartbeat`, advances a minimal self-describing
+and the prepare/request/drop protocol every candidate source speaks.
+
+A job whose boxes sit at one known script and whose successor is a fixed function of the box — the heartbeat,
+a Dexy tracker, an expiry refund — extends `ScriptJob`, and is then its rule and nothing else: `contract`,
+`due`, and `plan` returning a `Successor` (outputs, data inputs, which outputs are revenue). `ScriptJob` owns
+discovery by script through the node's index plus the configured `boxIds` fallback, assembly with no fee and
+no wallet input, signing with a prover that holds no key, and the capital entries. Jobs are registered as
+factories from their own config block, so a new protocol is one file and one config block; a job that does
+not fit the script shape implements `UpkeepJob` directly. The first job, `heartbeat`, advances a minimal self-describing
 due-job box (`upkeep/DueJob.ergo`: R4 last beat, R5 period, R6 tip; spendable by anyone once due; the
 successor must keep the script, tokens and terms and at most the tip leaves), and pays the tip to the
 miner's collection output as capital the holding top-up aggregates.
@@ -46,17 +53,26 @@ and never the mempool.
 
 ## Testing
 
-- `UpkeepSpec`: the pure half — the node's cost accounting, the share and its fitting, the refusal
-  memory's retry rule, and config loading and defaults.
+- **Observe mode** (`stratum.candidate.sources.upkeep.mode = "observe"`) lets this be watched on mainnet before
+  any Lithos block carries it: the source builds and sizes everything as for a block, puts each successor
+  through the node's `/transactions/check`, logs the verdict and what it would have offered, and answers
+  empty. The operator soaks the heartbeat this way against a real due-job box.
+- `UpkeepSpec`: the pure half — the node's cost accounting and the floor's token term against the node's own
+  arithmetic, the share offered successors in turn, the refusal memory's retry rule, config loading and
+  defaults, job factories reading their own keys, and validation of modes, job blocks and every job's
+  `boxIds`.
 - `UpkeepSourceSpec`: the actor against a mocked node and a steerable job — disabled and idle sources make
   no node read; discovery, revalidation, the per-job box cap and a job whose discovery throws; due
   versus refused; a job that throws on one box losing only that box; a box the node reports unreadable;
   refusals remembered across blocks and across an actor restart, forgotten when the box changes, and
   retried after `retryAfterScans` passes; a transaction over `maxCost` left out while a cheaper one
-  fits; building stopping at `maxTxs`; and the prepare/request/drop protocol.
-- `HeartbeatJobSpec`: discovery on an indexed node, on a plain node from the configured list, and with
-  the index down; `due` at the boundary; the successor and tip as built, signed by a prover holding no
-  secret; a box that can no longer pay its beat building nothing.
+  fits; building stopping at `maxTxs`; observe mode answering empty with one node check per built
+  successor and per height; and the prepare/request/drop protocol.
+- `ScriptJobSpec`: what every script job inherits, through a minimal fake — discovery on an indexed node
+  (paged, capped, with the index down) and on a plain node from the configured list; a plan signed with no
+  key and no fee, spending only the box, with its revenue declared; a data input carried and not spent.
+- `HeartbeatJobSpec`: the heartbeat's own rule — which boxes at its script are beats, `due` at the boundary,
+  the successor and tip as planned and signed, and a box that can no longer pay its beat building nothing.
 - `DueJobSpec`: the contract through the interpreter, offline — a due box advances, one block early is
   refused, and every condition of the script refused on exactly the field it reads.
 - `sbt -batch test` on Java 17 (to be confirmed by the operator before this is opened).

@@ -163,8 +163,15 @@ stratum.candidate.sources.upkeep.jobs.heartbeat.enabled = true
 ```
 The first job, `heartbeat`, advances due-job boxes (`DueJob.ergo` in lithos-lib) and pays their tip to your
 collection output. Finding them by script needs a node started with `ergo.node.extraIndex = true`; on a plain
-node, list the boxes to maintain in `jobs.heartbeat.boxIds`. A job name the client does not know is refused at
-startup.
+node, list the boxes to maintain in `jobs.heartbeat.boxIds` (every job takes `boxIds` the same way). A job name
+the client does not know is refused at startup.
+
+Until your miner finds a block there is nothing to see upkeep do, so it has an observe mode:
+```hocon
+stratum.candidate.sources.upkeep.mode = "observe"
+```
+Upkeep then builds everything exactly as it would for your block, asks your node to check each transaction, logs
+the verdict and what it would have offered, and offers nothing.
 
 Upkeep never spends your ERG. A job's transaction may only spend the boxes that job found, and the client refuses
 one that spends anything else; your wallet is never an input and no fee is paid. It does not reorder, front-run or
