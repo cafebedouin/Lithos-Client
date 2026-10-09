@@ -216,8 +216,8 @@ class HeartbeatJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     f.client.execute { ctx =>
       val height = ctx.getHeight + 1
       val bc = BuildContext(ctx, height, f.wallet.contract)
-      // Sized at a value with as many VLQ bytes as the box's, so the floor is the box's own.
-      val floor = floorOf(f, 1000000L, height, bc)
+      // Sized at a value with as many VLQ bytes (four) as the box value built below, so the floor is the box's own.
+      val floor = floorOf(f, 10000000L, height, bc)
       val spare = tip / 2
       val box = f.dueBox("a", lastBeat = height - period, value = floor + spare)
       floorOf(f, box.value, height, bc) shouldBe floor
