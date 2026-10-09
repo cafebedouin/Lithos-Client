@@ -127,10 +127,7 @@ pending transaction already spends is skipped for that block.
   by the node's check and the block by consensus. The rig (topology, node settings, an `/info` rewriting proxy
   for appkit, a CPU miner) lives in that repository, not here; `DEVNET.md` says what any private-chain run
   needs.
-- `sbt test` on Java 17: 2,698 tests. The only failures are the 8 cases of `state.persistence.SnapshotFallbackSpec`,
-  which is load-sensitive and fails the same way without this change: "keep a generation whose header could
-  not be read", "restore a generation the node confirms", "fall past a disproved generation to an older
-  confirmed one", "report no canonical snapshot only when every generation was checked", "terminate a restore
-  request on restart and ignore its stale validation completion", "refuse a byte-valid generation whose fields
-  contradict each other", "refuse a generation whose retained cursors do not reach its own", and "refuse
-  retained cursor identity from a same-height fork".
+- `sbt test` on Java 17: 2,774 tests, all passing (run with the stacked follow-on included). One spec outside this
+  change, `state.persistence.SnapshotFallbackSpec`, is load-sensitive: its first LevelDB open can exceed TestKit's
+  3-second expectation when the host is busy, and eight of its cases then fail together without this change. A
+  separate one-line PR gives it the 20 s the other actor specs allow.
