@@ -56,8 +56,8 @@ one address mainnet has no constant for is pinned too.
 ## Why
 
 Storage rent showed that this client can carry keyless, fee-less work in its own blocks, and that a Lithos
-miner is in a good place to do such work: it already builds the block, and the transaction costs it nothing
-to include. Rent is one rule; other protocols leave boxes that need periodic maintenance under rules of
+miner is in a good place to do such work: it already builds the block, and the transaction pays no fee and needs no key; its cost is block
+space a fee-paying transaction could have used. Rent is one rule; other protocols leave boxes that need periodic maintenance under rules of
 their own, and today they wait for an executor paying a mempool fee. Generalising the rent source's shape
 over a job registry lets a miner carry that maintenance for the protocols it opts into, and lets a
 protocol's maintenance be added as one reviewed job rather than a new source each time.
