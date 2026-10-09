@@ -41,11 +41,13 @@ import scala.util.{Failure, Success, Try}
  *                        with it, so one bad successor would otherwise cost the block the work of
  *                        every source.
  * @param space           `fixed` holds the source to its configured share; `opportunistic` lets it
- *                        grow, block by block, into what the package share would leave empty after
- *                        the mempool's own demand. Fixed by default, because whether fee-less work
- *                        should take space at all beyond what the operator set is a policy choice.
+ *                        grow, block by block, to the whole package share when the mempool's own
+ *                        demand fits in the rest of the block beside it. Fixed by default, because
+ *                        whether fee-less work should take space at all beyond what the operator
+ *                        set is a policy choice.
  * @param opportunisticMaxTxs the most successors an opportunistic share admits however empty the
- *                        block, so a runaway job cannot fill one.
+ *                        block, so a runaway job cannot fill one; the configured count wins if it
+ *                        is larger.
  */
 case class UpkeepConfig(scanIntervalMs: Int, maxBoxesPerJob: Int, retryAfterScans: Int,
                         jobs: Map[String, UpkeepConfig.Job],

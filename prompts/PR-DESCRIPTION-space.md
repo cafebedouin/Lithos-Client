@@ -2,7 +2,9 @@
 
 Stacked on the upkeep source PR and independent of it otherwise: it changes only the upkeep source, its
 config, and the line of wiring that hands the candidate builder upkeep's limits. It can be merged or
-closed on its own. With an unchanged config, behaviour is the same as the upkeep PR's.
+closed on its own. With an unchanged config the share is the same as the upkeep PR's; what changes is the order due
+boxes are built in when a job declares revenue (the heartbeat does: its tip), so boxes with unequal tips are no longer
+built in height rotation but best-paying first.
 
 ## What
 
@@ -13,13 +15,16 @@ closed on its own. With an unchanged config, behaviour is the same as the upkeep
    rotation, and a job that declares nothing keeps today's order exactly.
 2. **`stratum.candidate.sources.upkeep.space`**: `"fixed"` (default, today's behaviour) or
    `"opportunistic"`. Opportunistic, each build reads the mempool once (pages of
-   `/transactions/unconfirmed`; `poolHistogram` reports counts and fees, not bytes or cost), subtracts
-   that demand from the package budget the candidate builder uses
-   (`CandidateBudget.of(maxBlockSize, maxBlockCost, blockShare)`), and lets upkeep grow into the
-   remainder. It never goes past the remainder or past `opportunisticMaxTxs` (default 20), and never
-   below the configured share. A full mempool, one deeper than 20 pages, or a failed read keeps the
-   configured share. The builder bounds each source by its limits again, so in opportunistic mode only
-   the wiring raises upkeep's builder allowance to the cap. Package-wide admission still applies.
+   `/transactions/unconfirmed`, every transaction waiting; `poolHistogram` reports counts and fees, not
+   bytes or cost) and, when what is waiting fits in the rest of the block beside this client's whole
+   package share (`blockShare` of the block limits), lets upkeep grow to that package share, with the
+   count raised to `opportunisticMaxTxs` (default 20) or the configured `maxTxs` if that is larger.
+   The growth never displaces a transaction already waiting, and never goes below the configured
+   share. A mempool too full for that, one deeper than 20 pages, a page that cannot be read, or a
+   transaction the node reports without a size or cost keeps the configured share: the read errs only
+   toward growing less. The builder bounds each source by its limits again, so in opportunistic mode
+   only the wiring raises upkeep's builder allowance; the builder's package pass then fits every
+   source, upkeep last, into the package share as before.
 
 ## Why
 
@@ -29,10 +34,13 @@ work that pays least.
 
 ## The policy question
 
-Opportunistic mode takes space that no transaction waiting **now** wants. It cannot know whether a
-paying transaction arriving later, while the block is being mined, would have wanted that space. Whether
-fee-less work should take space a later paying transaction might have used is the maintainer's call. That
-is why the mode is off by default and capped.
+Opportunistic mode takes space that no transaction waiting **now** needs: it grows only when everything
+waiting fits in the block beside a full package. It cannot know whether a paying transaction arriving
+later, while the block is being mined, would have wanted that space. Whether fee-less work should take
+space a later paying transaction might have used is the maintainer's call. That is why the mode is off by
+default and capped. The ordering is a second, smaller policy: a cheaper due box waits while dearer ones are
+due, which is what ordering by value means; `minTip` on the heartbeat is the operator's bound on free
+beats taking slots.
 
 Opportunistic mode also reads the mempool. It counts bytes and cost only, and it does not look at what
 pending transactions do, so the upkeep PR's "not extractive" still holds. That PR's line "nothing reads
@@ -41,13 +49,15 @@ pending transactions" now needs the qualifier "except to count them, in opportun
 ## Testing
 
 - `UpkeepSpec`: the ordering (per byte, then per cost, stable, no revenue last); the opportunistic share
-  (demand over budget keeps the configured share, an empty mempool lifts it to the remainder, the cap
-  holds, the share never drops below configured); the demand read (sums, early stop, deep mempool
-  charged as full, missing cost charged at the block's cost per byte, failed page fails); config
-  defaults, parsing, validation and the builder allowance.
+  (waiting transactions that do not fit beside a full package keep the configured share, ones that fit
+  lift it to the package, a package no larger than the configured share keeps it, the configured count
+  wins over a smaller cap); the demand read (sums, early stop, a deep mempool charged as full, sums
+  saturating at the budget, a transaction without size or cost failing the read, a later page failing
+  the read); config defaults, parsing, validation and the builder allowance in isolation.
 - `UpkeepSourceSpec`: three due boxes with different tips and two slots admit the two highest tips
-  and build only those. Opportunistic mode with an empty mempool admits up to the cap. With demand over
-  the budget, or a mempool read failure, it admits the configured share. Fixed mode never reads the
-  mempool.
+  and build only those. Opportunistic mode with an empty mempool admits up to the cap. With waiting
+  transactions that do not fit beside the package, or a mempool read failure, it admits the configured
+  share. Fixed mode never reads the mempool. Nothing drives `CandidateBuilder` with an opportunistic
+  source; the builder's package pass is covered by its own specs.
 - `HeartbeatJobSpec`: expected revenue is the R6 tip, or 0 for a box that is not a beat.
 - Run with `sbt -batch "testOnly transactions.upkeep.*"` on Java 17.

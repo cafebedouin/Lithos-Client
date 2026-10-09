@@ -53,8 +53,8 @@ final class HeartbeatJob(boxIds: Seq[String], minTip: Long = HeartbeatJob.Defaul
 
   /**
    * The R6 tip: the most a beat pays. A box that cannot spare it all pays less, so the tip is an
-   * upper bound, which is all the source's ranking asks for; a box ranked high on a tip it cannot
-   * pay costs one build, not a block's share.
+   * upper bound; a box ranked high on a tip it then cannot pay still takes the slot it was built
+   * into. `minTip` is the operator's bound on that.
    */
   override def expectedRevenue(box: InputUTXO): Long = Beat.of(box).map(_.tip).getOrElse(0L)
 

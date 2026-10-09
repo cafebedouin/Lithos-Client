@@ -182,29 +182,29 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
   private val configuredShare = Upkeep.Share(slots = 5, bytes = 1000L, cost = 10000L)
   private val packageBudget = CandidateBudget(maxBytes = 100000L, maxCost = 1000000L)
 
-  "An opportunistic share" should "keep the configured share when the mempool's demand is over the package budget" in {
-    Upkeep.opportunistic(configuredShare, packageBudget, 200000L, 2000000L, maxTxs = 20) shouldBe configuredShare
-    Upkeep.opportunistic(configuredShare, packageBudget, 99500L, 0L, maxTxs = 20) shouldBe configuredShare
-    Upkeep.opportunistic(configuredShare, packageBudget, 0L, 995000L, maxTxs = 20) shouldBe configuredShare
+  /** A block twice the package: the mempool has the other half beside a full package. */
+  private val blockBudget = CandidateBudget(maxBytes = 200000L, maxCost = 2000000L)
+
+  "An opportunistic share" should "keep the configured share when the waiting transactions do not fit beside a full package" in {
+    Upkeep.opportunistic(configuredShare, packageBudget, blockBudget, 200000L, 2000000L, maxTxs = 20) shouldBe configuredShare
+    Upkeep.opportunistic(configuredShare, packageBudget, blockBudget, 100001L, 0L, maxTxs = 20) shouldBe configuredShare
+    Upkeep.opportunistic(configuredShare, packageBudget, blockBudget, 0L, 1000001L, maxTxs = 20) shouldBe configuredShare
   }
 
-  it should "grow to what an empty mempool leaves of the package, and no further than the cap allows" in {
-    Upkeep.opportunistic(configuredShare, packageBudget, 0L, 0L, maxTxs = 20) shouldBe
+  it should "grow to the whole package when the waiting transactions fit in the rest of the block" in {
+    Upkeep.opportunistic(configuredShare, packageBudget, blockBudget, 0L, 0L, maxTxs = 20) shouldBe
       Upkeep.Share(slots = 20, bytes = 100000L, cost = 1000000L)
-    Upkeep.opportunistic(configuredShare, packageBudget, 40000L, 300000L, maxTxs = 20) shouldBe
-      Upkeep.Share(slots = 20, bytes = 60000L, cost = 700000L)
+    Upkeep.opportunistic(configuredShare, packageBudget, blockBudget, 100000L, 1000000L, maxTxs = 20) shouldBe
+      Upkeep.Share(slots = 20, bytes = 100000L, cost = 1000000L)
+  }
+
+  it should "keep the configured share when the package is no larger than it" in {
+    val small = CandidateBudget(maxBytes = 1000L, maxCost = 10000L)
+    Upkeep.opportunistic(configuredShare, small, blockBudget, 0L, 0L, maxTxs = 20) shouldBe configuredShare
   }
 
   it should "never take fewer slots than configured, whatever the cap" in {
-    Upkeep.opportunistic(configuredShare, packageBudget, 0L, 0L, maxTxs = 2).slots shouldBe 5
-  }
-
-  /** Block limits at a round cost per byte: ten units of cost to the byte. */
-  private val blockParams: BlockchainParameters = {
-    val p = mock[BlockchainParameters]
-    when(p.getMaxBlockSize).thenReturn(100000)
-    when(p.getMaxBlockCost).thenReturn(1000000)
-    p
+    Upkeep.opportunistic(configuredShare, packageBudget, blockBudget, 0L, 0L, maxTxs = 2).slots shouldBe 5
   }
 
   private def waiting(n: Int, size: Option[Int], cost: Option[Long]): NodeTransaction =
@@ -224,17 +224,26 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
 
   "The mempool's demand" should "add up what the node reports for every waiting transaction" in {
     val (api, pages) = mempoolOf((1 to 150).map(n => waiting(n, Some(100), Some(2000L))))
-    Upkeep.demand(api, packageBudget, blockParams) shouldBe Success((15000L, 300000L))
+    Upkeep.demand(api, packageBudget) shouldBe Success((15000L, 300000L))
     pages.get shouldBe 2
   }
 
-  it should "charge a transaction with no reported cost at the block's cost per byte" in {
-    Upkeep.weight(waiting(1, Some(300), None), blockParams) shouldBe ((300L, 3000L))
+  it should "fail the read on a transaction reported without a size or a cost, rather than guess" in {
+    Upkeep.weight(waiting(1, Some(300), Some(3000L))) shouldBe ((300L, 3000L))
+    an[IllegalStateException] should be thrownBy Upkeep.weight(waiting(1, Some(300), None))
+    an[IllegalStateException] should be thrownBy Upkeep.weight(waiting(1, None, Some(3000L)))
+    val (api, _) = mempoolOf(Seq(waiting(1, Some(100), Some(1L)), waiting(2, Some(100), None)))
+    Upkeep.demand(api, packageBudget).isFailure shouldBe true
+  }
+
+  it should "saturate at the budget rather than wrap on absurd figures" in {
+    val (api, _) = mempoolOf((1 to 3).map(n => waiting(n, Some(Int.MaxValue), Some(Long.MaxValue / 2))))
+    Upkeep.demand(api, packageBudget) shouldBe Success((packageBudget.maxBytes, packageBudget.maxCost))
   }
 
   it should "stop reading once the demand reaches the budget" in {
     val (api, pages) = mempoolOf((1 to 1000).map(n => waiting(n, Some(1000), Some(1L))))
-    val demanded = Upkeep.demand(api, packageBudget, blockParams).get
+    val demanded = Upkeep.demand(api, packageBudget).get
     demanded._1 should be >= packageBudget.maxBytes
     pages.get shouldBe 1
   }
@@ -242,14 +251,18 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
   it should "charge a mempool deeper than it reads as the whole budget" in {
     val (api, pages) = mempoolOf((1 to (Upkeep.MaxMempoolPages + 1) * Upkeep.MempoolPage)
       .map(n => waiting(n, Some(1), Some(1L))))
-    Upkeep.demand(api, packageBudget, blockParams) shouldBe Success((packageBudget.maxBytes, packageBudget.maxCost))
+    Upkeep.demand(api, packageBudget) shouldBe Success((packageBudget.maxBytes, packageBudget.maxCost))
     pages.get shouldBe Upkeep.MaxMempoolPages
   }
 
-  it should "fail when a page cannot be read, rather than count part of the mempool" in {
+  it should "fail when a later page cannot be read, rather than count the pages before it" in {
     val api = mock[NodeApi]
-    when(api.unconfirmedTransactions(any[Paging])).thenReturn(Failure(new RuntimeException("node down")))
-    Upkeep.demand(api, packageBudget, blockParams).isFailure shouldBe true
+    when(api.unconfirmedTransactions(any[Paging])).thenAnswer { inv =>
+      val paging = inv.getArgument[Paging](0)
+      if (paging.offset == 0) Success((1 to Upkeep.MempoolPage).map(n => waiting(n, Some(10), Some(10L))))
+      else Failure(new RuntimeException("node down"))
+    }
+    Upkeep.demand(api, packageBudget).isFailure shouldBe true
   }
 
   "A successor's kind" should "name its job, so a refused block says which one built it" in {

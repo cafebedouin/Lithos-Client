@@ -358,21 +358,24 @@ class UpkeepSource(nodeContext: NodeContext,
   }
 
   /**
-   * The share for one block in opportunistic mode: the configured one, or the space the mempool's
-   * demand leaves of the package share when that is larger. The package share is worked out as the
-   * candidate builder works it, from the node's parameters for this block and `blockShare`. A
-   * mempool that cannot be read leaves the configured share, which is what fixed mode takes anyway.
+   * The share for one block in opportunistic mode: the configured one, or the whole package share
+   * when the mempool's demand fits in the rest of the block beside it. The package share is worked
+   * out as the candidate builder works it, from the node's parameters for this block and
+   * `blockShare`. A mempool that cannot be read or weighed leaves the configured share, which is
+   * what fixed mode takes anyway.
    */
   private def opportunisticShare(bc: BuildContext, configured: Upkeep.Share, blockHeight: Int): Upkeep.Share = {
-    val pkg = CandidateBudget.of(bc.params.getMaxBlockSize.toLong, bc.params.getMaxBlockCost.toLong, blockShare)
-    Upkeep.demand(nodeApi, pkg, bc.params) match {
+    val block = CandidateBudget(bc.params.getMaxBlockSize.toLong, bc.params.getMaxBlockCost.toLong)
+    val pkg = CandidateBudget.of(block.maxBytes, block.maxCost, blockShare)
+    Upkeep.demand(nodeApi, block) match {
       case Failure(ex) =>
         logger.warn(s"Upkeep could not read the mempool at $blockHeight, keeping the configured share: ${ex.getMessage}")
         configured
       case Success((bytes, cost)) =>
-        val share = Upkeep.opportunistic(configured, pkg, bytes, cost, upkeepConfig.opportunisticMaxTxs)
-        logger.debug(s"Upkeep at $blockHeight: the mempool claims ${bytes}B and $cost cost of the package's " +
-          s"${pkg.maxBytes}B and ${pkg.maxCost} cost; share txs=${share.slots}, bytes=${share.bytes}, cost=${share.cost}")
+        val share = Upkeep.opportunistic(configured, pkg, block, bytes, cost, upkeepConfig.opportunisticMaxTxs)
+        logger.debug(s"Upkeep at $blockHeight: the mempool claims ${bytes}B and $cost cost of the block's " +
+          s"${block.maxBytes}B and ${block.maxCost}, the package being ${pkg.maxBytes}B and ${pkg.maxCost}; " +
+          s"share txs=${share.slots}, bytes=${share.bytes}, cost=${share.cost}")
         share
     }
   }

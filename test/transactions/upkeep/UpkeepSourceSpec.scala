@@ -667,7 +667,7 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     f.mempoolReads.get should be > 0
   }
 
-  it should "keep the configured share when the mempool's demand is over the package budget" in {
+  it should "keep the configured share when the waiting transactions do not fit beside a full package" in {
     val f = new Space()
     f.mempool = Success(Seq(crowd))
     val bundles = f.scanUntil(f.readCount > 0)

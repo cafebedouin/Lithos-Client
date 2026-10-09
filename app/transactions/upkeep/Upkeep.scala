@@ -191,19 +191,22 @@ object Upkeep {
 
   /**
    * The bytes and cost the transactions waiting in the mempool would claim, read once per build so
-   * upkeep can take only what they leave. Reading stops as soon as the demand reaches `budget` on
-   * either dimension, since nothing past that changes the answer, and a mempool deeper than
-   * [[MaxMempoolPages]] pages is charged as `budget` in full. Every waiting transaction is counted
-   * as demand, which can only overstate it: overstated, upkeep takes less; understated, it would
-   * take space a paying transaction wanted. A failed page fails the read, so the caller can fall
-   * back rather than act on part of the mempool.
+   * upkeep can grow only when they fit beside it. Reading stops as soon as the demand reaches
+   * `budget` on either dimension, since nothing past that changes the answer, and a mempool deeper
+   * than [[MaxMempoolPages]] pages is charged as `budget` in full. Sums saturate at `budget`, so no
+   * reported figure can wrap them. Every waiting transaction is counted, fee or not, which can only
+   * overstate the demand: overstated, upkeep grows less often; understated, it would take space a
+   * paying transaction wanted. For the same reason a transaction the node reports without a size or
+   * a cost fails the read, as does a page that cannot be read, so the caller falls back to the
+   * configured share rather than act on a guess or on part of the mempool.
    */
-  def demand(api: NodeApi, budget: CandidateBudget, params: BlockchainParameters): Try[(Long, Long)] = Try {
+  def demand(api: NodeApi, budget: CandidateBudget): Try[(Long, Long)] = Try {
     var bytes = 0L
     var cost = 0L
     var paging = Paging(0, MempoolPage)
     var pages = 0
     var ended = false
+    def saturating(sum: Long, add: Long, cap: Long): Long = if (add >= cap - sum) cap else sum + add
     while (!ended && bytes < budget.maxBytes && cost < budget.maxCost) {
       if (pages >= MaxMempoolPages) {
         bytes = math.max(bytes, budget.maxBytes)
@@ -211,9 +214,9 @@ object Upkeep {
       } else {
         val page = api.unconfirmedTransactions(paging).get
         page.foreach { tx =>
-          val (b, c) = weight(tx, params)
-          bytes += b
-          cost += c
+          val (b, c) = weight(tx)
+          bytes = saturating(bytes, b, budget.maxBytes)
+          cost = saturating(cost, c, budget.maxCost)
         }
         ended = page.size < paging.limit
         paging = paging.next
@@ -224,29 +227,32 @@ object Upkeep {
   }
 
   /**
-   * What one waiting transaction claims: the size the node reports, or its encoded length, which is
-   * longer; and the cost the node measured, or, when it reported none, its bytes at the block's own
-   * cost per byte, so a mempool whose costs are unknown is not read as one that costs nothing.
+   * What one waiting transaction claims: the size and the cost the node reports. A transaction
+   * reported without either cannot be weighed (an estimate from its bytes would understate a
+   * script-heavy one, and understating is the one direction this read must not err in), so it
+   * fails the read.
    */
-  private[upkeep] def weight(tx: NodeTransaction, params: BlockchainParameters): (Long, Long) = {
-    val bytes = tx.size.map(_.toLong).getOrElse(NodeCodecs.encodeTransaction(tx).toString.length.toLong)
-    val cost = tx.cost.getOrElse(bytes * params.getMaxBlockCost.toLong / math.max(1L, params.getMaxBlockSize.toLong))
-    (bytes, cost)
+  private[upkeep] def weight(tx: NodeTransaction): (Long, Long) = (tx.size, tx.cost) match {
+    case (Some(bytes), Some(cost)) if bytes >= 0 && cost >= 0L => (bytes.toLong, cost)
+    case _ => throw new IllegalStateException(s"the node reports no size or cost for ${tx.id}, so the mempool " +
+      "cannot be weighed")
   }
 
   /**
-   * The source's share in opportunistic mode: the configured one, or what `pkg` has left after the
-   * mempool's demand when that is larger on both bytes and cost, with the count raised to `maxTxs`.
-   * Never more than the remainder, so upkeep takes only space the waiting transactions leave, and
-   * never less than configured, so the operator's own share is kept when the mempool is full. A
-   * remainder larger on one dimension only means the waiting transactions already claim the other,
-   * and the configured share stands.
+   * The source's share in opportunistic mode. The block holds this client's package (`pkg`, its
+   * `blockShare` of `block`) and, beside it, whatever the node fills from the mempool. The share
+   * grows to the whole package only when the mempool's demand fits in the rest of the block on
+   * both bytes and cost, so no transaction already waiting is displaced by the growth; the package
+   * pass in the candidate builder still fits every source into `pkg` after this. Otherwise the
+   * configured share stands, as it does when the package is no larger than it: never fewer slots,
+   * bytes or cost than configured, and the count raised to the larger of the configured count and
+   * `maxTxs`.
    */
-  def opportunistic(configured: Share, pkg: CandidateBudget, demandBytes: Long, demandCost: Long,
-                    maxTxs: Int): Share = {
-    val left = pkg.less(demandBytes, demandCost)
-    if (left.maxBytes > configured.bytes && left.maxCost > configured.cost)
-      Share(math.max(configured.slots, maxTxs), left.maxBytes, left.maxCost)
+  def opportunistic(configured: Share, pkg: CandidateBudget, block: CandidateBudget, demandBytes: Long,
+                    demandCost: Long, maxTxs: Int): Share = {
+    val fits = demandBytes <= block.maxBytes - pkg.maxBytes && demandCost <= block.maxCost - pkg.maxCost
+    if (fits && pkg.maxBytes > configured.bytes && pkg.maxCost > configured.cost)
+      Share(math.max(configured.slots, maxTxs), pkg.maxBytes, pkg.maxCost)
     else configured
   }
 
