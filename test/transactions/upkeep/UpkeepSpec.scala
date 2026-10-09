@@ -204,6 +204,11 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     Upkeep.opportunistic(configuredShare, rest, 0L, 0L, maxTxs = 2).slots shouldBe 5
   }
 
+  it should "not grow a configured count of zero, the sign the source is not to be asked" in {
+    val off = configuredShare.copy(slots = 0)
+    Upkeep.opportunistic(off, rest, 0L, 0L, maxTxs = 20) shouldBe off
+  }
+
   private def waiting(n: Int, size: Option[Int], cost: Option[Long]): NodeTransaction =
     NodeTransaction(id(s"pending$n"), Seq.empty, Seq.empty, Seq.empty, size, cost)
 

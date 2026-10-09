@@ -261,11 +261,13 @@ object Upkeep {
    * otherwise the configured share stands. A demand that reaches `rest` exactly does not fit:
    * [[demand]] saturates there, so that figure means "at least this". The growth is in the count
    * only, so the bytes and cost the operator set bound upkeep as in fixed mode, and the candidate
-   * builder's per-source and package passes stand unchanged.
+   * builder's per-source and package passes stand unchanged. A configured count of 0 never grows:
+   * it is the operator's sign that the source is not to be asked, and the builder would refuse
+   * every successor anyway.
    */
   def opportunistic(configured: Share, rest: CandidateBudget, demandBytes: Long, demandCost: Long,
                     maxTxs: Int): Share =
-    if (demandBytes < rest.maxBytes && demandCost < rest.maxCost)
+    if (configured.slots > 0 && demandBytes < rest.maxBytes && demandCost < rest.maxCost)
       configured.copy(slots = math.max(configured.slots, maxTxs))
     else configured
 
