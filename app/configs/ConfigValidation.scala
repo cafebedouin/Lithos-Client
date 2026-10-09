@@ -225,6 +225,10 @@ object Configs {
     val maxBoxesPerJob = v.range("stratum.candidate.sources.upkeep.maxBoxesPerJob",
       v.int("stratum.candidate.sources.upkeep.maxBoxesPerJob"), 1, 4096,
       "box ids one upkeep job may hold between passes").getOrElse(UpkeepConfig.Default.maxBoxesPerJob)
+    v.string("stratum.candidate.sources.upkeep.mode").foreach { mode =>
+      if (!UpkeepConfig.Modes.contains(mode))
+        v.problem("stratum.candidate.sources.upkeep.mode", s"must be one of ${UpkeepConfig.Modes.mkString(", ")}")
+    }
     v.range("stratum.candidate.sources.upkeep.retryAfterScans",
       v.int("stratum.candidate.sources.upkeep.retryAfterScans"), 1, 100000,
       "discovery passes a refused upkeep box sits out before it is offered again")

@@ -21,15 +21,30 @@ import play.api.{ConfigLoader, Configuration}
  *                        retries after this many passes rather than never; a box refused again
  *                        sits out as many again.
  * @param jobs            each configured job by name. Absent is off.
+ * @param mode            `candidate` offers what is built to the block; `observe` builds, sizes and
+ *                        puts each successor through the node's transaction check exactly as it
+ *                        would offer it, logs the verdict, and offers nothing. For an operator with
+ *                        no block yet, who has no other way to see upkeep do anything real.
  */
 case class UpkeepConfig(scanIntervalMs: Int, maxBoxesPerJob: Int, retryAfterScans: Int,
-                        jobs: Map[String, UpkeepConfig.Job]) {
+                        jobs: Map[String, UpkeepConfig.Job],
+                        mode: String = UpkeepConfig.Candidate) {
   def jobEnabled(name: String): Boolean = jobs.get(name).exists(_.enabled)
+
+  def observing: Boolean = mode == UpkeepConfig.Observe
 }
 
 object UpkeepConfig {
 
   final val Path = "stratum.candidate.sources.upkeep"
+
+  /** Offer what is built to the block: the default, and the only mode that does anything on chain. */
+  final val Candidate = "candidate"
+
+  /** Build and check everything as for a block, log it, and offer nothing. */
+  final val Observe = "observe"
+
+  final val Modes: Seq[String] = Seq(Candidate, Observe)
 
   /**
    * One job's block under `jobs.<name>`: the keys every job may carry, read here once for all of
@@ -57,7 +72,8 @@ object UpkeepConfig {
     scanIntervalMs = 60000,
     maxBoxesPerJob = 256,
     retryAfterScans = 10,
-    jobs = Map.empty)
+    jobs = Map.empty,
+    mode = Candidate)
 
   def apply(config: Configuration): UpkeepConfig = {
     def int(key: String, fallback: Int): Int =
@@ -75,6 +91,7 @@ object UpkeepConfig {
       scanIntervalMs = int("scanIntervalMs", Default.scanIntervalMs),
       maxBoxesPerJob = int("maxBoxesPerJob", Default.maxBoxesPerJob),
       retryAfterScans = int("retryAfterScans", Default.retryAfterScans),
-      jobs = jobs)
+      jobs = jobs,
+      mode = config.getOptional(s"$Path.mode")(ConfigLoader.stringLoader).getOrElse(Default.mode))
   }
 }

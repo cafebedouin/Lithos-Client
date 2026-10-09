@@ -38,6 +38,13 @@ import scala.util.{Failure, Success, Try}
  * successor cannot be built, or cannot even be read, is refused on its own; the others in the same
  * job and every other job's are offered as usual, and the source answers whatever happened.
  *
+ * In observe mode (`mode = "observe"`) everything above runs as it would, and each successor the
+ * share admits is put through the node's transaction check before the block is answered empty.
+ * The check is the node's own verdict on the transaction as it would have been offered, which is
+ * the one thing a miner with no block yet cannot otherwise see; it is one node call per successor,
+ * made on the build thread like the rest of the build, and a refusal there is logged and nothing
+ * more, because what is being watched is the job, and a box set aside would stop being watched.
+ *
  * Never extractive. This source spends only the boxes its jobs discovered, in the order their
  * scripts allow, and nothing here reads, reorders or front-runs anyone else's transaction.
  */
@@ -79,7 +86,7 @@ class UpkeepSource(nodeContext: NodeContext,
     if (!active) {
       logger.info(s"UpkeepSource idle: enabled=${limits.enabled}, jobs=${jobs.map(_.name).mkString(", ")}")
     } else {
-      logger.info(s"UpkeepSource started: jobs=${jobs.map(_.name).mkString(", ")}, " +
+      logger.info(s"UpkeepSource started: mode=${upkeepConfig.mode}, jobs=${jobs.map(_.name).mkString(", ")}, " +
         s"scanIntervalMs=${upkeepConfig.scanIntervalMs}, maxBoxesPerJob=${upkeepConfig.maxBoxesPerJob}, " +
         s"retryAfterScans=${upkeepConfig.retryAfterScans}, share: txs=${limits.maxTxs}, " +
         s"bytes=${limits.maxBytes}, cost=${limits.maxCost}; refusedHeld=${memory.refusedIds.size}")
@@ -220,13 +227,17 @@ class UpkeepSource(nodeContext: NodeContext,
 
       val chosen = share.chosen
       if (chosen.nonEmpty || deferred > 0)
-        logger.info(s"Upkeep offers ${chosen.size} of $due due successors at $blockHeight" +
+        logger.info(s"Upkeep ${if (upkeepConfig.observing) "would offer" else "offers"} " +
+          s"${chosen.size} of $due due successors at $blockHeight" +
           (if (deferred > 0) s", $deferred left for a later block" else "") +
           (if (queue.hasNext) ", share full before every box was tried" else "") +
           s": ${chosen.map(_.label).mkString(", ")}; share used " +
           s"txs=${chosen.size}/${limits.maxTxs}, bytes=${share.usedBytes(limits.budget)}/${limits.maxBytes}, " +
           s"cost=${share.usedCost(limits.budget)}/${limits.maxCost}")
-      chosen.map(_.bundle)
+      if (upkeepConfig.observing) {
+        chosen.foreach(observe(_, blockHeight))
+        Seq.empty[CandidateBundle]
+      } else chosen.map(_.bundle)
     }) match {
       case Success(bundles) => bundles
       case Failure(ex) =>
@@ -288,6 +299,21 @@ class UpkeepSource(nodeContext: NodeContext,
       case Failure(ex) => Left(s"build failed: ${ex.getMessage}")
       case Success(outcome) => outcome
     }
+
+  /**
+   * Observe mode's report on one successor the block would have carried: the node's verdict on the
+   * signed transaction, and what it would have cost the block and paid this miner. A check that
+   * cannot be made at all is reported as such, and costs only this line.
+   */
+  private def observe(successor: Upkeep.Prepared, blockHeight: Int): Unit = {
+    val offer = s"Upkeep observe at $blockHeight: ${successor.label} as tx ${successor.tx.id}, " +
+      s"${successor.tx.sizeBytes}B, ${successor.tx.cost} cost, paying " +
+      s"${successor.capital.map(_.value).sum} nanoERG to this miner"
+    Try(nodeApi.checkTransaction(successor.tx.json)).flatten match {
+      case Success(_) => logger.info(s"$offer: the node's check accepts it")
+      case Failure(ex) => logger.warn(s"$offer: the node's check refuses it: ${ex.getMessage}")
+    }
+  }
 
   /**
    * One pass over every job. A job that throws is logged and left out of the pass, so one

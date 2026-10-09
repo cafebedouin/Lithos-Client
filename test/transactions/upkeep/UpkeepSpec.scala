@@ -218,6 +218,15 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     val config = UpkeepConfig(Configuration.from(Map("stratum.candidate.sources.upkeep.enabled" -> true)))
     config.jobs shouldBe empty
     config.retryAfterScans shouldBe UpkeepConfig.Default.retryAfterScans
+    config.mode shouldBe UpkeepConfig.Candidate
+    config.observing shouldBe false
+  }
+
+  "The mode" should "default to candidate and read observe from config" in {
+    UpkeepConfig.Default.mode shouldBe UpkeepConfig.Candidate
+    val config = UpkeepConfig(Configuration.from(Map("stratum.candidate.sources.upkeep.mode" -> "observe")))
+    config.mode shouldBe UpkeepConfig.Observe
+    config.observing shouldBe true
   }
 
   "A job's box list" should "be read from jobs.<name>.boxIds for every job, and leave its flag alone" in {
@@ -311,6 +320,13 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     validated(s"""stratum.candidate.sources.upkeep.maxBoxesPerJob = 2
                  |stratum.candidate.sources.upkeep.jobs.heartbeat.boxIds = $ids""".stripMargin)
       .getOrElse(fail("three ids were accepted for a cap of two")) should include("at most 2")
+  }
+
+  it should "accept the two modes and refuse any other" in {
+    validated("""stratum.candidate.sources.upkeep.mode = "observe"""") shouldBe None
+    validated("""stratum.candidate.sources.upkeep.mode = "candidate"""") shouldBe None
+    validated("""stratum.candidate.sources.upkeep.mode = "broadcast"""")
+      .getOrElse(fail("an unknown mode was accepted")) should include("upkeep.mode")
   }
 
   it should "refuse a job entry that is not a block" in {

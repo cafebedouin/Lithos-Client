@@ -22,7 +22,7 @@ import transactions.upkeep.UpkeepSource.ScanTick
 import java.util.concurrent.atomic.AtomicInteger
 import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.duration._
-import scala.util.Success
+import scala.util.{Failure, Success}
 
 object UpkeepSourceSpec {
   val config: com.typesafe.config.Config = ConfigFactory.parseString("""
@@ -67,7 +67,8 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
                         maxBoxes: Int = UpkeepConfig.Default.maxBoxesPerJob,
                         retryAfterScans: Int = 1000,
                         limits: CandidateSourceConfig = defaultLimits,
-                        supervised: Boolean = false) {
+                        supervised: Boolean = false,
+                        mode: String = UpkeepConfig.Candidate) {
     val api: NodeApi = mock[NodeApi]
     val (nodeContext, _, wallet) = FakeNodeContext(api, numAddresses = 1)
 
@@ -80,11 +81,22 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
       Success(live.filter(box => asked.contains(box.boxId)))
     }
 
+    /** Every transaction put through the node's check, and whether the check refuses them. */
+    val checked = ArrayBuffer.empty[String]
+    @volatile var checkRefuses: Boolean = false
+    when(api.checkTransaction(any[String])).thenAnswer { inv =>
+      checked.synchronized(checked += inv.getArgument[String](0))
+      if (checkRefuses) Failure(new RuntimeException("the node refuses it")) else Success("checked")
+    }
+
+    def checkCount: Int = checked.synchronized(checked.size)
+
     val job = new FakeJob(wallet)
     val other = new FakeJob(wallet, "other")
     val upkeepConfig: UpkeepConfig = UpkeepConfig.Default.copy(maxBoxesPerJob = maxBoxes,
       retryAfterScans = retryAfterScans, jobs = Map(
-        job.name -> UpkeepConfig.Job(enabled = jobEnabled), other.name -> UpkeepConfig.Job(enabled = jobEnabled)))
+        job.name -> UpkeepConfig.Job(enabled = jobEnabled), other.name -> UpkeepConfig.Job(enabled = jobEnabled)),
+      mode = mode)
     val enabledJobs: Seq[UpkeepJob] = UpkeepRegistry.enabled(upkeepConfig,
       Seq(job, other).take(jobs).map(fake => JobFactory(fake.name, _ => fake)))
     val memory = new UpkeepSource.Memory(retryAfterScans)
@@ -413,6 +425,67 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     f.memory.refusedIds shouldBe empty
     f.request() should have size 1
     f.job.builds.get shouldBe 2
+  }
+
+  // ─── observe mode ─────────────────────────────────────────────────────────
+
+  "Observe mode" should "answer empty and put each built successor through the node's check once" in {
+    val f = new Fixture(mode = UpkeepConfig.Observe)
+    val a = f.box("a")
+    val b = f.box("b")
+    f.job.discovered = Seq(a.boxId, b.boxId)
+    f.live = Seq(a, b)
+
+    f.scanUntil(f.job.builds.get >= 2) shouldBe empty
+    f.job.builds.get shouldBe 2
+    f.checkCount shouldBe 2
+    f.checked.synchronized(f.checked.toSet.size) shouldBe 2
+    f.memory.refusedIds shouldBe empty
+
+    // Every block is checked again: what is being watched is the job, block after block.
+    f.request() shouldBe empty
+    f.job.builds.get shouldBe 4
+    f.checkCount shouldBe 4
+  }
+
+  it should "check once per height, serving a request from what was prepared for it" in {
+    val f = new Fixture(mode = UpkeepConfig.Observe)
+    val a = f.box("a")
+    f.job.discovered = Seq(a.boxId)
+    f.live = Seq(a)
+    f.scanUntil(f.job.builds.get >= 1)
+    val checks = f.checkCount
+
+    val height = nextHeight()
+    f.source ! PrepareBlockTxs(height, defaultLimits.maxTxs)
+    f.request(height) shouldBe empty
+    f.request(height) shouldBe empty
+    f.checkCount shouldBe checks + 1
+  }
+
+  /** A refusal there is the finding observe mode exists to report, not a reason to stop watching. */
+  it should "log a refusal by the node's check and not refuse the box" in {
+    val f = new Fixture(mode = UpkeepConfig.Observe)
+    val a = f.box("a")
+    f.job.discovered = Seq(a.boxId)
+    f.live = Seq(a)
+    f.checkRefuses = true
+
+    f.scanUntil(f.job.builds.get >= 1) shouldBe empty
+    f.checkCount shouldBe f.job.builds.get
+    f.memory.refusedIds shouldBe empty
+    f.request() shouldBe empty
+    f.checkCount shouldBe f.job.builds.get
+  }
+
+  "Candidate mode" should "offer what it builds and never ask the node's check" in {
+    val f = new Fixture()
+    val a = f.box("a")
+    f.job.discovered = Seq(a.boxId)
+    f.live = Seq(a)
+
+    f.scanUntil(f.job.builds.get >= 1) should have size 1
+    f.checkCount shouldBe 0
   }
 
   // ─── the candidate protocol ───────────────────────────────────────────────
