@@ -63,28 +63,22 @@ Steps, each one transaction, each waited for confirmation before the next (poll 
 Idempotence: refuse to run against a node whose wallet already holds a token named like these unless `--force`.
 Everything logged at info with the transaction ids. Exit non-zero with the step named on any failure.
 
-## 3. The devnet proxy
+## 3. Where the rest lives
 
-appkit refuses a node whose `/info` reports `"network": "devnet"` (it maps only mainnet and testnet). Add
-`scripts/devnet-proxy.py`: a small stdlib-only HTTP forwarder that rewrites that one field on `/info` to `testnet`
-and passes everything else through byte for byte, with `--listen` and `--upstream` flags, and `--record-checks FILE`
-that appends every body posted to `/transactions/check` as JSON lines (so an operator can see exactly what the
-client built). Document it as experiment tooling, not for mainnet.
+The orchestration is not this repository's: the devnet topology, the hook that brings up an indexed mining node, the
+`/info` rewriting proxy appkit needs (it refuses a node reporting `"network": "devnet"`), the deployment descriptors
+and the end-to-end checks live in the operator's network-infrastructure repository (peeryard, `rig/examples/lithos-*`).
+This repository provides only what must compile the contracts: the override in section 1 and the deployer in section
+2. Add `DEVNET.md` at the root as one page: the config keys (`node.deployment.file`, `allowOnMainnet`), the deployer's
+command line and descriptor format, and a pointer that a worked devnet run is maintained outside this repository.
 
-## 4. `DEVNET.md`
-
-A walkthrough at the repository root: start a devnet node with `extraIndex = true` and mining on; run the proxy;
-run the deployer with `--fund` for the client's address; write a client config with `node.deployment.file`,
-`node.networkType = TESTNET`, `emission.autoCollateralize = true`, the stats and batchers off; what to expect in the
-log in order (deployment loaded, emission box found, a Join, an Activate, the first genesis transaction, block
-transactions collected) and how long each takes at 2-second blocks; how to add a due-job box and watch upkeep carry it.
+## 4. (merged into 3)
 
 ## 5. Specs
 
 - Deployer: the boxes it plans parse through the client's own readers on the mocked node (`support.FakeNodeContext`),
   and `CandidateTxBuilder.loadCollateral` finds a collateral box created against the override's ids.
 - Override: as in section 1.
-- The proxy has no spec; it is a script.
 
 Run `sbt -batch compile Test/compile "testOnly transactions.* lfsm.* tools.*"` with Java 17 if you can. One commit per
 section. Report what you could not determine from the code about the box shapes, with the file:line you looked at.
