@@ -160,8 +160,9 @@ It is **off by default**, and so is every job. To run it, enable the source and 
 stratum.candidate.sources.upkeep.enabled = true
 stratum.candidate.sources.upkeep.jobs.heartbeat.enabled = true
 ```
-The first job, `heartbeat`, advances due-job boxes (`DueJob.ergo` in lithos-lib) and pays their tip to your
-collection output. Finding them by script needs a node started with `ergo.node.extraIndex = true`. Any node also
+The first job, `heartbeat`, advances due-job boxes (`DueJob.ergo`, kept with the tests; the client carries only its
+tree) and pays their tip to your collection output. By default a beat must pay at least a thousandth of an ERG
+(`minTip`); set it to 0 to maintain boxes that cannot pay. Finding them by script needs a node started with `ergo.node.extraIndex = true`. Any node also
 reads the boxes listed in `jobs.heartbeat.boxIds` (every job takes `boxIds` the same way); on a plain node that
 list is all the job sees, and it goes stale after each beat, because a beat gives the box a new id. A job name
 that is enabled and unknown is refused at startup.
@@ -189,8 +190,7 @@ owner and no exit, so check the registers before sending. On testnet, box
 The shipped `heartbeat` job never spends your ERG: it spends only boxes at its own script, signs with a prover that
 holds no key, and pays no fee. The client also refuses any job's transaction that spends a box at one of your wallet's
 keys or a box the job did not report. Upkeep's only use of the mempool is to skip a box a pending transaction already
-spends; it never reads what pending transactions do, and it never builds on unconfirmed outputs. Observe mode keeps no
-memory and needs the source and a job enabled. A box whose build fails is set aside and tried again after
+spends; it never reads what pending transactions do, and it never builds on unconfirmed outputs. A box whose build fails is set aside and tried again after
 `retryAfterScans` discovery passes; a box that cannot pay its successor is set aside until it changes.
 
 ## KYA

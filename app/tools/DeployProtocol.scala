@@ -28,7 +28,7 @@ final class DeployFailure(val step: String, cause: Throwable)
  *
  * {{{
  * sbt "runMain tools.DeployProtocol --node http://127.0.0.1:9153 --api-key hello \
- *   --keystore <keystore.json> --pass <pass> --network TESTNET --out deployment.json \
+ *   --keystore <keystore.json> --pass-file <file> --network TESTNET --out deployment.json \
  *   [--fund <address>:<nanoERG>:<LIT>]... [--force] [--allow-mainnet] [--timeout-seconds 1800] [--reward-delay 720]"
  * }}}
  *
@@ -58,7 +58,7 @@ object DeployProtocol {
                         rewardDelay: Int)
 
   val Usage: String =
-    """usage: tools.DeployProtocol --node <url> --api-key <key> --keystore <keystore.json> --pass <pass>
+    """usage: tools.DeployProtocol --node <url> --api-key <key> --keystore <keystore.json> --pass-file <file>
       |                            --network <MAINNET|TESTNET> --out <deployment.json>
       |                            [--fund <address>:<nanoERG>:<LIT base units>]... [--force] [--allow-mainnet]
       |                            [--timeout-seconds <n>] [--reward-delay <blocks>]""".stripMargin
@@ -71,7 +71,7 @@ object DeployProtocol {
     var force = false
     var allowMainnet = false
     var rest = args.toList
-    val valued = Set("--node", "--api-key", "--keystore", "--pass", "--network", "--out", "--fund",
+    val valued = Set("--node", "--api-key", "--keystore", "--pass", "--pass-file", "--network", "--out", "--fund",
       "--timeout-seconds", "--reward-delay")
     while (rest.nonEmpty) rest match {
       case "--force" :: tail => force = true; rest = tail
@@ -91,7 +91,14 @@ object DeployProtocol {
     val key = req("--api-key")
     val keystore = req("--keystore").map(Paths.get(_))
     keystore.filterNot(Files.isRegularFile(_)).foreach(p => problems += s"--keystore $p does not exist")
-    val pass = req("--pass")
+    // The keystore password from a file (its first line), so it is in neither the process list nor the
+    // shell history; --pass is kept for scripts that already guard both.
+    val pass = (values.get("--pass-file"), values.get("--pass")) match {
+      case (Some(file), _) => Try(scala.io.Source.fromFile(file)).map(s => try s.getLines().next().trim finally s.close())
+        .toOption.filter(_.nonEmpty).orElse { problems += s"--pass-file $file cannot be read or is empty"; None }
+      case (None, Some(p)) => Some(p)
+      case (None, None) => problems += "--pass-file (or --pass) is required"; None
+    }
     val network = req("--network").flatMap { n =>
       Try(NetworkType.valueOf(n.trim.toUpperCase)).toOption.orElse {
         problems += s"--network must be MAINNET or TESTNET, got $n"; None

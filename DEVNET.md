@@ -30,12 +30,14 @@ The node must run with `ergo.node.extraIndex = true`.
 
 ```sh
 java -cp "target/universal/stage/lib/*" tools.DeployProtocol --node http://127.0.0.1:9153 --api-key hello \
-  --keystore <keystore.json> --pass <pass> --network TESTNET --out deployment.json \
+  --keystore <keystore.json> --pass-file <file> --network TESTNET --out deployment.json \
   [--fund <address>:<nanoERG>:<LIT base units>]... [--force] [--allow-mainnet] [--timeout-seconds 1800] [--reward-delay 720]
 ```
 
-It is run by classpath because the stage launcher's `-main` cannot see the application jar. It signs
-with the keystore's EIP-3 index 0 key and spends that key's token-free boxes and matured coinbase
+It is run by classpath because the stage launcher's `-main` cannot see the application jar. The
+keystore password is read from the first line of `--pass-file` (`--pass` on the command line is
+accepted for scripts that keep it out of the process list and history themselves). It signs with
+the keystore's EIP-3 index 0 key and spends that key's token-free boxes and matured coinbase
 boxes. A private chain that locks coinbases for fewer blocks than mainnet's 720 also has a different
 reward script, since the delay is part of it: give the chain's lock as `--reward-delay`, or pay the
 key a plain box first. Each step is one transaction and waits for confirmation (something must be
@@ -81,7 +83,7 @@ Ids are 64 hex characters. A Lithos block is one whose first transaction spends 
 
 ## Worked runs
 
-Two things any private-chain run needs, learned from running this end to end on a devnet:
+Two things any private-chain run needs:
 
 - **Mine the first blocks with the node's own miner.** A fresh chain's early work is Autolykos v1,
   which only the node's internal miner solves; it mines with the wallet's first secret and ignores

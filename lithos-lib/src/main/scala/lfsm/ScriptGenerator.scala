@@ -14,7 +14,6 @@ object ScriptGenerator {
   private final val FRAUD_PROOFS = "fraudproofs/"
   private final val DICTIONARIES = "dictionaries/"
   private final val LITHOS_DEX = "lithosdex/"
-  private final val UPKEEP = "upkeep/"
 
   def mkSigTrue(ctx: BlockchainContext): Contract = {
     mkSigTrue(ctx.getNetworkType)
@@ -61,11 +60,5 @@ object ScriptGenerator {
   }
 
   /** Scripts the upkeep source's jobs advance: boxes that state their own successor. */
-  def mkUpkeepScript(name: String): String = {
-    val src = Source.fromResource(UPKEEP + name + EXT)
-    val script = src.mkString
-    src.close()
-    script
-  }
 
 }

@@ -29,9 +29,10 @@ A beat is valid in exactly one block, the one whose height it is stamped with, s
 for the next height; a non-miner can broadcast one, paying any fee out of the tip, and it is valid only if the very
 next block includes it. `jobs.heartbeat.minTip` makes the job decline any beat that would pay less than that, free
 beats included: a box offering less is not maintained, a box offering enough that cannot pay it is held until it
-changes. No due-job box exists on mainnet yet; the README says how to create one, and testnet has one. Lithos itself has mined about 30 mainnet blocks so far (heights 1,888,828 to
-1,890,575, about 1.7% of blocks over that span), so upkeep carried only in Lithos blocks waits at least about 60 blocks today,
-and longer while few Lithos miners enable it.
+changes. No due-job box exists on mainnet yet; the README says how to create one, and testnet has one. By default a beat
+must pay at least a thousandth of an ERG (`minTip`), so a box anyone paid dust into at the public script is not
+re-stamped for free with its rent clock reset; 0 maintains every box. The contract's source is kept with the tests
+(`test/resources/upkeep/DueJob.ergo`): the client carries only the pinned tree.
 
 ### Running on a private chain
 
@@ -70,15 +71,13 @@ job is enabled. A job name that is enabled and unknown is refused at startup by 
 
 ## Not extractive
 
-Upkeep never looks at pending transactions to decide what to build. Its read-back uses the node's
-mempool-adjusted view, so a box a pending transaction already spends is dropped until the next scan; a spend
-that reaches the mempool after the read-back loses to this miner's own block, as with any block producer.
-
-A job's transaction may only spend boxes that job reported from discovery, and never a box at one of this
-wallet's keys; the source refuses either. `ScriptJob` also makes the box the only input, refuses a fee output,
-and refuses revenue declared at anything but this miner's collection contract. The shipped job reports only boxes
-at its own script and signs with a prover that holds no key. The miner takes the tip another executor would
-otherwise have earned in that block, which is the ordinary block-producer advantage.
+Upkeep's only use of the mempool is to skip a box a pending transaction already spends; it never reads what pending
+transactions do, and discovery reads confirmed boxes only. A job's transaction may only spend boxes that job reported
+from discovery, never a box at one of this wallet's keys, may pay no fee, and may send revenue only to this miner's
+collection contract; the source and `ScriptJob` refuse each of those. The miner takes the tip another executor would
+otherwise have earned in that block, which is the ordinary block-producer advantage. A box both the rent source and
+upkeep could claim in one package (a due-job box nobody beat for four years) is admitted once: the builder refuses the
+second bundle as a conflicting spend.
 
 ## Limits
 
@@ -102,53 +101,29 @@ otherwise have earned in that block, which is the ordinary block-producer advant
 - **Broadcast mode** — sending upkeep to the mempool with a fee from the operator's wallet when this
   miner finds no block. Left out because it spends operator ERG, which this client's own rule for block
   transactions forbids; it would be a separate, clearly marked option.
-- **A Dexy job** against the relaunched contracts. The framework is written so that it is one job, one
-  registry entry and one config block.
+- **A first protocol job.** The framework is written so that one is an implementation, a registry entry and a
+  config block; the heartbeat proves the source works, a protocol job is what proves it is worth having.
 
 ## Testing
 
-- **Observe mode** (`stratum.candidate.sources.upkeep.mode = "observe"`) lets this be watched before any Lithos block carries it (there is
-  no due-job box on mainnet yet; testnet has one): every request is answered empty at once, and in the background the source
-  builds and sizes everything as for a block, puts each successor through the node's `/transactions/check`
-  (up to `maxTxs` checks per block) and logs the verdict.
-- `UpkeepSpec`: the pure half — the node's cost accounting and the floor's token term against the node's own
-  arithmetic, the share offered successors in turn, the memory's retry rule and its hold on boxes that
-  cannot pay, config loading and defaults, job factories reading their own keys, and validation of modes,
-  `verifyWithNode`, job blocks and every job's `boxIds`.
-- `UpkeepSourceSpec`: the actor against a mocked node and a steerable job — no source without an enabled job;
-  the first scan on the timer; discovery, chunked read-back, the per-job cap that never cuts configured ids,
-  and a job whose discovery throws; due, exhausted and refused; a build stopping after 16 refusals; a job that
-  throws on one box losing only that box; a box the node reports unreadable; holds kept across blocks and an
-  actor restart, forgotten when the box changes, and refusals retried after `retryAfterScans` passes; a
-  transaction over `maxCost` left out while a cheaper one fits; building stopping at `maxTxs`; the box order
-  rotating with the height; the node's check accepting, refusing, or switched off; observe mode answering empty
-  with one background check per successor and per height; and the prepare/request/drop protocol.
-- `ScriptJobSpec`: what every script job inherits, through a minimal fake — discovery on an indexed node
-  (paged, capped, ordered by priority, skipping re-emission boxes, with the index down) and the configured
-  list read by id from the UTXO set on any node; a plan signed with no key and no fee, spending only the box,
-  with its revenue declared; a plan that leaves change refused; a data input carried and not spent.
-- `HeartbeatJobSpec`: the heartbeat's own rule — the pinned tree, which boxes at its script are beats, `due`
-  at the boundary, the successor and tip as planned and signed, a partial tip when the box cannot spare the
-  whole, and a free beat when what it can spare is too small for a box.
-- `DeployPlanSpec` and `ProtocolContractsDeploymentSpec`: the deployer's plan (mint, protocol boxes, descriptor,
-  funding) against a fake node, the self-join a funded operator can make with the client's own builders, the
-  refusal of funding below one join, the command line; and the contract pins: with no override every tree is
-  the pinned one, an override reaches every contract that compiles an id in and leaves `payout` and the other
-  network alone, and it is not served from a cache filled before it was installed.
-- `DueJobSpec`: the contract through the interpreter, offline — a due box advances, one block early is
-  refused, every condition of the script refused on the field it reads (a zero period and a negative tip for
-  `sane`), a second due-job box in the same transaction refused, a stale creation height refused, a tip above
-  the value taking all but a box's minimum, and a box whose R4 + R5 passes `Int.MaxValue` refused.
-- End to end. A due-job box is live on testnet (`e5d9d2c29f7be9914c604c8102c6f08839cdd01c006c312c1596c144fe6d8fe1`,
-  period 720, tip 0.01 ERG; observe it with the config in the README, `mode = "observe"`, against a testnet node
-  started with `extraIndex`). On a private chain
-  with 20-second blocks, one command of a test rig goes from a wiped chain to a block the
-  client built: the deployer deploys the protocol, the client joins the collateral queue with its own ERG and
-  LIT, and a block carries the client's genesis transaction and the upkeep beat together, the beat accepted
-  by the node's check (which runs the node's stateful validation at its next height, not the mempool's fee
-  floor) and the block by consensus. The rig (topology, node settings, an `/info` rewriting proxy for appkit,
-  a CPU miner) is a test rig outside this repository; `DEVNET.md` says what any private-chain run needs.
-- `sbt test` on Java 17 at this branch's head: 2,767 tests, all passing. One spec outside this change,
-  `state.persistence.SnapshotFallbackSpec`, is load-sensitive: its first LevelDB open can exceed TestKit's
-  3-second expectation when the host is busy, and eight of its cases then fail together without this change. A
-  separate one-line PR gives it the 20 s the other actor specs allow.
+- **Observe mode** (`stratum.candidate.sources.upkeep.mode = "observe"`) lets this be watched before any Lithos block
+  carries it: every request is answered empty at once, and in the background the source builds and sizes everything as
+  for a block, puts each successor through the node's `/transactions/check` and logs the verdict. To repeat on public
+  testnet: a testnet node with `ergo.node.extraIndex = true`; in the client, `stratum.candidate.sources.upkeep.enabled =
+  true`, `jobs.heartbeat.enabled = true`, `mode = "observe"`; expect `Upkeep scan holds 1 boxes: heartbeat=1`, then at
+  each height after the box `e5d9d2c29f7be9914c604c8102c6f08839cdd01c006c312c1596c144fe6d8fe1` (period 720, tip 0.01
+  ERG) is due, `Upkeep observe at <height>: heartbeat … the node's check accepts it`.
+- Specs: `UpkeepSpec` (the pure half: cost accounting and floors against the node's own arithmetic for the token term,
+  the share, the memory, config and validation), `UpkeepSourceSpec` (the actor against a mocked node: discovery, holds,
+  the build's bounds, the wallet check, refresh, observe mode, the candidate protocol), `ScriptJobSpec` (what every
+  script job inherits: discovery, keyless and fee-less assembly, the fee and revenue refusals), `HeartbeatJobSpec` (the
+  pinned tree, due, the beat's terms, `minTip`), `DueJobSpec` (the contract through the interpreter, one property per
+  condition), `DeployPlanSpec`, `DeploymentSpec`, `DeploymentConfigSpec` and `ProtocolContractsDeploymentSpec` (the
+  deployer, the override, the pins recorded from and checked against the base commit's compiler).
+- End to end on a private chain with 20-second blocks: the deployer deployed the protocol, the client joined the
+  collateral queue with its own ERG and LIT, and a block carried the client's genesis transaction and the upkeep beat
+  together, the beat accepted by the node's check (the node's stateful validation at its next height, not the mempool's
+  fee floor) and the block by consensus. The rig is outside this repository; `DEVNET.md` says what any private-chain
+  run needs.
+- `sbt test` on Java 17 at this branch's head: 2,767 tests, all passing. (A load-sensitive spec outside this change,
+  `SnapshotFallbackSpec`, has a one-line fix in its own PR.)

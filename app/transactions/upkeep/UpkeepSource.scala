@@ -74,7 +74,16 @@ class UpkeepSource(nodeContext: NodeContext,
   /** The highest height observe mode has started a task for, so each height is observed once. */
   private var observedThrough: Int = Int.MinValue
 
+  /** Whether an observe task is still running, so a slow node does not pile them up. */
+  private var observing: Boolean = false
+
+  /** What the last build admitted, so an unchanged block logs at debug and a changed one at info. */
+  private val lastAdmitted = new java.util.concurrent.atomic.AtomicReference[String]("")
+
   override def preStart(): Unit = {
+    if (!upkeepConfig.verifyWithNode && !upkeepConfig.observing)
+      logger.warn("Upkeep runs with verifyWithNode = false: a successor the node would refuse costs the block every " +
+        "inserted transaction")
     logger.info(s"UpkeepSource started: mode=${upkeepConfig.mode}, verifyWithNode=${upkeepConfig.verifyWithNode}, " +
       s"jobs=${jobs.map(_.name).mkString(", ")}, scanIntervalMs=${upkeepConfig.scanIntervalMs}, " +
       s"maxBoxesPerJob=${upkeepConfig.maxBoxesPerJob}, retryAfterScans=${memory.retryAfterScans}, " +
@@ -159,6 +168,8 @@ class UpkeepSource(nodeContext: NodeContext,
     // Nothing to reconcile: a successor holds no wallet input and was never broadcast, so a
     // dropped height leaves only the work itself, which is rebuilt for the next one.
     case CandidateTxsDropped(blockHeight) => preparation.drop(blockHeight)
+
+    case Observed => observing = false
   }
 
   /** Each job's work for one build, read here because the build runs off the mailbox. */
@@ -186,12 +197,17 @@ class UpkeepSource(nodeContext: NodeContext,
    * to build is not counted, so the first request after a scan lands starts the task.
    */
   private def observe(blockHeight: Int): Unit =
-    if (blockHeight > observedThrough) {
+    if (blockHeight > observedThrough && !observing) {
       val work = offered()
       if (work.nonEmpty) {
         observedThrough = blockHeight
-        Try(Future(advance(work, blockHeight, remember = false).foreach(report(_, blockHeight)))(candidateWorker))
-          .failed.foreach(ex => logger.warn(s"Upkeep could not observe $blockHeight: ${ex.getMessage}"))
+        observing = true
+        Try(Future(advance(work, blockHeight, remember = false).foreach(report(_, blockHeight)))(candidateWorker)
+          .onComplete(_ => self ! Observed)(candidateWorker))
+          .failed.foreach { ex =>
+            observing = false
+            logger.warn(s"Upkeep could not observe $blockHeight: ${ex.getMessage}")
+          }
       }
     }
 
@@ -269,8 +285,11 @@ class UpkeepSource(nodeContext: NodeContext,
           "fit the share left; the boxes not yet tried wait for a later block")
 
       val chosen = share.chosen
+      val admitted = chosen.map(_.label).mkString(", ")
+      val changed = lastAdmitted.getAndSet(admitted) != admitted
       if (chosen.nonEmpty || deferred > 0)
-        logger.info(s"Upkeep ${if (upkeepConfig.observing) "would offer" else "admits"} " +
+        (if (changed) logger.info(_: String) else logger.debug(_: String))(
+          s"Upkeep ${if (upkeepConfig.observing) "would offer" else "admits"} " +
           s"${chosen.size} of $due due successors at $blockHeight" +
           (if (deferred > 0) s", $deferred left for a later block" else "") +
           (if (share.full && queue.hasNext) ", share full before every box was tried" else "") +
@@ -507,6 +526,9 @@ object UpkeepSource {
   private[upkeep] final case class Spent(ids: Set[String])
 
   /** Boxes whose builds were refused, so they sit out passes before they are offered again. */
+  /** An observe task has finished, so the next height may start one. */
+  private[upkeep] case object Observed
+
   private[upkeep] final case class Refused(ids: Set[String])
 
   /** Boxes their job says cannot pay, so they are not offered until a scan stops finding them. */

@@ -11,6 +11,7 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import support.{CanonicalNodeBox, FakeNodeContext}
 import transactions.engine.execution.RollupExecution
+import configs.UpkeepConfig
 import transactions.upkeep.jobs.HeartbeatJob
 import transactions.upkeep.jobs.HeartbeatJob.Beat
 import sigma.ast.ErgoTree
@@ -42,7 +43,8 @@ class HeartbeatJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     val api: NodeApi = mock[NodeApi]
     val (nodeContext, _, wallet) = FakeNodeContext(api, numAddresses = 1)
     val client = nodeContext.getClient
-    val job = new HeartbeatJob(Seq.empty)
+    /** minTip 0, so the free-beat cases below are reachable; the default is tested on its own. */
+    val job = new HeartbeatJob(Seq.empty, minTip = 0L)
     val tree: String = client.execute(ctx => HeartbeatJob.contract(ctx.getNetworkType).ergoTreeHex)
 
     /** What the index holds. */
@@ -74,8 +76,8 @@ class HeartbeatJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
   // ─── the tree ─────────────────────────────────────────────────────────────
 
   "The pinned tree" should "be what DueJob.ergo compiles to, on every network" in {
-    HeartbeatJob.compile(NetworkType.MAINNET).ergoTreeHex shouldBe HeartbeatJob.TreeHex
-    HeartbeatJob.compile(NetworkType.TESTNET).ergoTreeHex shouldBe HeartbeatJob.TreeHex
+    support.UpkeepContracts.mkDueJobContract(NetworkType.MAINNET).ergoTreeHex shouldBe HeartbeatJob.TreeHex
+    support.UpkeepContracts.mkDueJobContract(NetworkType.TESTNET).ergoTreeHex shouldBe HeartbeatJob.TreeHex
   }
 
   it should "be the tree discovery compares against, whatever the network" in {
@@ -272,6 +274,16 @@ class HeartbeatJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       choosy.maintains(f.dueBox("a", tip = tip).toInputUTXO(ctx)) shouldBe true
       choosy.maintains(f.dueBox("b", tip = tip - 1L).toInputUTXO(ctx)) shouldBe false
       f.job.maintains(f.dueBox("c", tip = 0L).toInputUTXO(ctx)) shouldBe true
+    }
+    // the default declines a free beat: a beat must pay at least a thousandth of an ERG
+    f.client.execute { ctx =>
+      val height = ctx.getHeight + 1
+      val bc = BuildContext(ctx, height, f.wallet.contract)
+      val floor = floorOf(f, 1000000L, height, bc)
+      val byDefault = HeartbeatJob.Factory.make(UpkeepConfig.Job(enabled = true))
+      byDefault.build(f.dueBox("g", lastBeat = height - period, value = floor + 1000L).toInputUTXO(ctx), bc) shouldBe None
+      byDefault.build(f.dueBox("h", lastBeat = height - period, tip = HeartbeatJob.DefaultMinTip).toInputUTXO(ctx), bc)
+        .map(_.capital.map(_.value).sum) shouldBe Some(HeartbeatJob.DefaultMinTip)
     }
     HeartbeatJob.Factory.check(play.api.Configuration.from(Map("minTip" -> -1L))) should not be empty
     HeartbeatJob.Factory.check(play.api.Configuration.from(Map("minTip" -> 5L))) shouldBe empty

@@ -345,7 +345,7 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
 
   private def validated(hocon: String): Option[String] = {
     val config = Configuration(ConfigFactory.parseString(hocon).withFallback(shipped.underlying).resolve())
-    Try(Configs.validateAll(config, UpkeepRegistry.checks)) match {
+    Try(Configs.validateAll(config)) match {
       case Failure(ex: ConfigValidationException) => Some(ex.getMessage)
       case Failure(ex) => throw ex
       case Success(_) => None

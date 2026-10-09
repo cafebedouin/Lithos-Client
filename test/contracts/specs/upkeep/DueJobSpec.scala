@@ -1,7 +1,7 @@
 package contracts.specs.upkeep
 
 import contracts.specs.harness.ContractSpecBase
-import lfsm.contracts.UpkeepContracts
+import support.UpkeepContracts
 import org.ergoplatform.appkit._
 import org.ergoplatform.sdk.ErgoId
 import org.scalatest.propspec.AnyPropSpec

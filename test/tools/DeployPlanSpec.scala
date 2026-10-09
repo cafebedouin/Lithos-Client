@@ -221,6 +221,17 @@ class DeployPlanSpec extends AnyFlatSpec with Matchers with MockitoSugar with Be
     problems.exists(_.contains("--bogus")) shouldBe true
   }
 
+  it should "read the keystore password from --pass-file, and require one of the two" in {
+    val ks = java.nio.file.Files.createTempFile("ks", ".json")
+    val pf = java.nio.file.Files.createTempFile("pass", ".txt")
+    java.nio.file.Files.write(pf, "s3cret\n".getBytes)
+    val base = Seq("--node", "http://n", "--api-key", "k", "--keystore", ks.toString, "--network", "TESTNET", "--out", "/tmp/d.json")
+    DeployProtocol.parseArgs(base ++ Seq("--pass-file", pf.toString)).toOption.get.pass shouldEqual "s3cret"
+    DeployProtocol.parseArgs(base).left.toOption.get.exists(_.contains("--pass-file")) shouldBe true
+    DeployProtocol.parseArgs(base ++ Seq("--pass-file", "/nonexistent/x")).left.toOption.get
+      .exists(_.contains("cannot be read")) shouldBe true
+  }
+
   it should "refuse MAINNET unless --allow-mainnet is given" in {
     val ks = java.nio.file.Files.createTempFile("ks", ".json")
     val base = Seq("--node", "http://n", "--api-key", "k", "--keystore", ks.toString, "--pass", "p",

@@ -41,8 +41,8 @@ import scala.util.{Failure, Success, Try}
  */
 case class UpkeepConfig(scanIntervalMs: Int, maxBoxesPerJob: Int, retryAfterScans: Int,
                         jobs: Map[String, UpkeepConfig.Job],
-                        mode: String = UpkeepConfig.Candidate,
-                        verifyWithNode: Boolean = true) {
+                        mode: String,
+                        verifyWithNode: Boolean) {
   def jobEnabled(name: String): Boolean = jobs.get(name).exists(_.enabled)
 
   def observing: Boolean = mode == UpkeepConfig.Observe

@@ -22,7 +22,7 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
 
     // Validate all configuration before constructing components that depend on it.
     haltOnConfigProblem {
-      configs.Configs.validateAll(configuration, transactions.upkeep.UpkeepRegistry.checks)
+      configs.Configs.validateAll(configuration)
 
       // Convert NodeConfig startup failures into the same concise configuration report.
       Globals.setConfigs(configuration)

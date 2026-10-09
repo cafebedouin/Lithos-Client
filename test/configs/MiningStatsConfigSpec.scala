@@ -4,7 +4,6 @@ import com.typesafe.config.ConfigFactory
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import play.api.Configuration
-import transactions.upkeep.UpkeepRegistry
 
 class MiningStatsConfigSpec extends AnyFlatSpec with Matchers {
   private val shipped = Configuration(ConfigFactory.parseResources("application.conf").resolve())
@@ -22,7 +21,7 @@ class MiningStatsConfigSpec extends AnyFlatSpec with Matchers {
       "readTimeoutMs=0", "readBudgetMs=0", "staleAfterMs=10000").foreach { bad =>
       val configured = Configuration(ConfigFactory.parseString(s"stats.mining.$bad").withFallback(shipped.underlying))
       intercept[ConfigValidationException](StatsConfig(configured)).getMessage should include("stats.mining.")
-      intercept[ConfigValidationException](Configs.validateAll(configured, UpkeepRegistry.checks)).getMessage should include("stats.mining.")
+      intercept[ConfigValidationException](Configs.validateAll(configured)).getMessage should include("stats.mining.")
     }
   }
 }

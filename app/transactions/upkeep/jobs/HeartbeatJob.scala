@@ -1,13 +1,12 @@
 package transactions.upkeep.jobs
 
-import lfsm.contracts.UpkeepContracts
 import org.ergoplatform.appkit.{ErgoValue, NetworkType}
 import sigma.ast.ErgoTree
 import transactions.upkeep.{BuildContext, JobFactory, ScriptJob, Successor}
 import work.lithos.mutations.{Contract, InputUTXO, UTXO}
 
 /**
- * The reference upkeep job: advances boxes under `upkeep/DueJob.ergo`, which state their own
+ * The reference upkeep job: advances boxes under `DueJob.ergo`, which state their own
  * successor.
  *
  * A due-job box says in its registers when it is next due (R4 last beat, R5 period) and what it
@@ -16,9 +15,9 @@ import work.lithos.mutations.{Contract, InputUTXO, UTXO}
  * that tree", due is the register rule, and the successor is the box with R4 and its creation
  * height set to the block, any R7 to R9 dropped, and less whatever tip is paid.
  *
- * The tree is pinned, not compiled: [[HeartbeatJob.TreeHex]] is what was reviewed, and a change to
- * the script file cannot change which boxes a running client spends. The spec compiles the script
- * and holds it to the constant.
+ * The tree is pinned, not compiled: [[HeartbeatJob.TreeHex]] is what was reviewed, and the client
+ * carries no script source; `test/resources/upkeep/DueJob.ergo` is the record of what the tree is,
+ * and the spec compiles it and holds it to the constant.
  *
  * Discovery by script needs the node's extra index; on a plain node the job maintains the box ids
  * listed in `jobs.heartbeat.boxIds`, which go stale with every beat, since a beat gives the box a
@@ -37,7 +36,7 @@ import work.lithos.mutations.{Contract, InputUTXO, UTXO}
  * @param boxIds the ids listed in config, maintained on every node
  * @param minTip the smallest tip a beat must pay, in nanoERG; 0 maintains every box and beats for free
  */
-final class HeartbeatJob(boxIds: Seq[String], minTip: Long = 0L) extends ScriptJob(boxIds) {
+final class HeartbeatJob(boxIds: Seq[String], minTip: Long = HeartbeatJob.DefaultMinTip) extends ScriptJob(boxIds) {
 
   import HeartbeatJob.Beat
 
@@ -85,17 +84,24 @@ object HeartbeatJob {
   /** The one key of its own: `minTip`, the smallest tip a box must offer, 0 by default. */
   final val MinTipKey = "minTip"
 
+  /**
+   * The default `minTip`: a thousandth of an ERG, so that a beat pays for its own tip output and a
+   * box anyone paid dust into at the public script is not re-stamped for free, block after block,
+   * with its rent clock reset each time. 0 maintains every box, free beats included.
+   */
+  final val DefaultMinTip: Long = 1000000L
+
   val Factory: JobFactory = JobFactory(Name,
-    job => new HeartbeatJob(job.boxIds, job.block.getOptional[Long](MinTipKey).getOrElse(0L)),
+    job => new HeartbeatJob(job.boxIds, job.block.getOptional[Long](MinTipKey).getOrElse(DefaultMinTip)),
     check = block => block.getOptional[Long](MinTipKey) match {
       case Some(t) if t < 0L => Seq(MinTipKey -> "must not be negative")
       case _ => Seq.empty
     })
 
   /**
-   * The ErgoTree of `upkeep/DueJob.ergo` as reviewed. The script takes no constants and names no
-   * address, so the tree is the same on every network; `HeartbeatJobSpec` compiles it for mainnet
-   * and testnet and holds both to this.
+   * The ErgoTree of `DueJob.ergo` (kept with the tests) as reviewed. The script takes no constants
+   * and names no address, so the tree is the same on every network; `HeartbeatJobSpec` compiles it
+   * for mainnet and testnet and holds both to this.
    */
   final val TreeHex: String =
     "1b8f01040400040005000400d804d601e4c6a70504d602e4c6a70605d603b2a5730000d604c1a7d1edededededed" +
@@ -108,9 +114,6 @@ object HeartbeatJob {
 
   /** The pinned contract, whatever the network: discovery compares every box against its tree. */
   def contract(networkType: NetworkType): Contract = pinned
-
-  /** The script as it compiles now, for the spec that holds it to [[TreeHex]]. */
-  def compile(networkType: NetworkType): Contract = UpkeepContracts.mkDueJobContract(networkType)
 
   /**
    * A due-job box's registers, read: R4 Int, R5 Int and R6 Long, with a positive period and a tip
