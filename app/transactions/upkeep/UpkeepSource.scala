@@ -265,8 +265,11 @@ class UpkeepSource(nodeContext: NodeContext,
     }
 
   /**
-   * The successors the node's check accepts. One it refuses, or cannot check, is left out and
-   * refused here, because a package the node rejects loses every inserted transaction with it.
+   * The successors the node's check accepts. One it refuses, or cannot check, is left out of this
+   * height, because a package the node rejects loses every inserted transaction with it. It is not
+   * remembered: the check runs at the node's next height, which can already be past the height this
+   * build stamped when blocks come fast, and the next height builds a different transaction anyway.
+   * A box the job itself cannot advance is caught before this, by the build.
    */
   private def verified(chosen: Vector[Upkeep.Prepared], blockHeight: Int): Vector[Upkeep.Prepared] = {
     val (accepted, refused) = chosen.partition { successor =>
@@ -277,7 +280,6 @@ class UpkeepSource(nodeContext: NodeContext,
           false
       }
     }
-    if (refused.nonEmpty) self ! Refused(refused.map(_.boxId).toSet)
     if (chosen.nonEmpty) logger.info(s"Upkeep offers ${accepted.size} of ${chosen.size} successors at $blockHeight " +
       s"after the node's check: ${accepted.map(_.label).mkString(", ")}")
     accepted

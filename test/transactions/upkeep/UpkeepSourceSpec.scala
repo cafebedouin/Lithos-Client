@@ -577,7 +577,8 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     f.checkCount shouldBe 1
   }
 
-  it should "leave out and refuse a successor the node's check refuses" in {
+  /** The check runs at the node's own next height, so a refusal can be the height moving on, not the box. */
+  it should "leave out a successor the node's check refuses and try the box again next height" in {
     val f = new Fixture()
     val a = f.box("a")
     f.job.discovered = Seq(a.boxId)
@@ -586,10 +587,11 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
 
     f.scanUntil(f.job.builds.get >= 1) shouldBe empty
     f.checkCount shouldBe 1
-    f.memory.refusedIds shouldBe Set(a.boxId)
+    f.memory.refusedIds shouldBe empty
 
-    f.request() shouldBe empty
-    f.job.builds.get shouldBe 1
+    f.checkRefuses = false
+    f.request() should have size 1
+    f.job.builds.get shouldBe 2
   }
 
   it should "offer without asking the node's check when verifyWithNode is off" in {
