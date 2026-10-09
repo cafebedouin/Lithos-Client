@@ -127,6 +127,15 @@ class HeartbeatJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     }
   }
 
+  "Expected revenue" should "be the R6 tip, and nothing for a box whose registers are not a beat" in {
+    val f = new Fixture()
+    val malformed = f.dueBox("b", registers = Seq(ErgoValue.of(1000), ErgoValue.of(period.toLong), ErgoValue.of(tip)))
+    f.client.execute { ctx =>
+      f.job.expectedRevenue(f.dueBox("a", tip = 3 * tip).toInputUTXO(ctx)) shouldBe 3 * tip
+      f.job.expectedRevenue(malformed.toInputUTXO(ctx)) shouldBe 0L
+    }
+  }
+
   "A beat" should "read R4, R5 and R6 and nothing past them" in {
     val annotated: Seq[ErgoValue[_]] = Seq(ErgoValue.of(1000), ErgoValue.of(period), ErgoValue.of(tip), ErgoValue.of(42L))
     val short: Seq[ErgoValue[_]] = Seq(ErgoValue.of(1000), ErgoValue.of(period))

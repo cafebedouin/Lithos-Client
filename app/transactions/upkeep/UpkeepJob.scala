@@ -44,6 +44,16 @@ trait UpkeepJob {
   def due(box: InputUTXO, height: Int): Boolean
 
   /**
+   * What advancing `box` would pay this miner, in nanoERG, as far as the box alone says, before
+   * anything is built: the source puts the due boxes that pay the most per byte first, so a share
+   * that runs out runs out on the work worth least to the block. Revenue is known exactly only once
+   * the job has signed, and signing every box to rank them is the cost this avoids, so a stated
+   * upper bound will do. Pure and cheap, because it is asked of every offered box every block. A
+   * job that cannot say returns 0 and its boxes go after every paying one.
+   */
+  def expectedRevenue(box: InputUTXO): Long = 0L
+
+  /**
    * The signed successor for one due box, or nothing when the box cannot pay for it. Signed by the
    * job because only the job knows what satisfies its script. Outputs are created at `bc.height`
    * and revenue sits at `bc.payTo`. The preHeader at signing carries only that height: a script

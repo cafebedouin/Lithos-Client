@@ -498,6 +498,23 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     UpkeepSource.rotated(Seq.empty[Int], 7) shouldBe empty
   }
 
+  /** Boxes of one shape, so tip per byte orders as the tip does, at every rotation. */
+  it should "admit the highest tips per byte, and build only those" in {
+    val f = new Fixture(limits = defaultLimits.copy(maxTxs = 2))
+    val Seq(low, high, middle) = Seq("a", "b", "c").map(f.box)
+    f.job.discovered = Seq(low, high, middle).map(_.boxId)
+    f.live = Seq(low, high, middle)
+    f.job.declaredTips = Map(low.boxId -> 1000L, high.boxId -> 3000L, middle.boxId -> 2000L)
+    f.scanUntil(f.readCount > 0)
+
+    Seq(700, 701, 702).foreach { height =>
+      val before = f.job.builds.get
+      val bundles = f.request(height)
+      bundles.flatMap(_.members.flatMap(_.inputIds)).toSet shouldBe Set(high.boxId, middle.boxId)
+      withClue("the cheapest box was built though the share was full: ") { f.job.builds.get - before shouldBe 2 }
+    }
+  }
+
   it should "stop building once maxTxs successors are ready, and leave the rest for a later block" in {
     val f = new Fixture(limits = defaultLimits.copy(maxTxs = 1))
     val boxes = Seq("a", "b", "c").map(f.box)

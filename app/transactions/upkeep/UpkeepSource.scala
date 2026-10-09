@@ -193,8 +193,11 @@ class UpkeepSource(nodeContext: NodeContext,
    * The read, in chunks of [[ReadChunk]], is the node's mempool-adjusted view: an id that does not
    * come back is spent, or spent by a pending transaction, and is skipped. A failed read builds
    * nothing. A box is sized before it is signed, and building stops at a full share or after
-   * [[MaxRefusedPerBuild]] refusals. The order starts at `blockHeight` modulo the number of boxes,
-   * so a box deferred at the head does not starve the ones behind it.
+   * [[MaxRefusedPerBuild]] refusals. Boxes go in order of what their successors pay per byte, then
+   * per unit of cost, so the share is spent on the best-paying work first and a full share stops
+   * the build rather than leaving the best box untried. Among boxes worth the same, the order starts
+   * at `blockHeight` modulo their number, so a box deferred at the head does not starve the ones
+   * behind it.
    */
   private def advance(work: Seq[JobWork], blockHeight: Int): Vector[Upkeep.Prepared] =
     Try(nodeContext.getClient.execute { ctx =>
@@ -218,11 +221,15 @@ class UpkeepSource(nodeContext: NodeContext,
       var exhausted = Set.empty[String]
       var due = 0
       var deferred = 0
-      val ordered = work.flatMap(item => item.offered.toSeq.sorted.flatMap(byId.get).map(item -> _))
-      val queue = rotated(ordered, blockHeight).iterator
+      // Parsed once, here, because ranking needs the box as much as building does.
+      val ordered = work.flatMap(item => item.offered.toSeq.sorted.flatMap(byId.get)
+        .map(box => (item, box, Try(box.toInputUTXO(ctx)))))
+      val queue = Upkeep.byWorth(rotated(ordered, blockHeight)) { case (item, _, parsed) =>
+        worth(bc, item.job, parsed)
+      }.iterator
       while (!share.full && refused.size < MaxRefusedPerBuild && queue.hasNext) {
-        val (item, box) = queue.next()
-        attempt(bc, item, box, share) match {
+        val (item, box, parsed) = queue.next()
+        attempt(bc, item, box, parsed, share) match {
           case Attempt.Ready(successor, admitted) =>
             due += 1
             share = admitted
@@ -286,13 +293,27 @@ class UpkeepSource(nodeContext: NodeContext,
   }
 
   /**
+   * What one box's successor earns the block for its [[Upkeep.floor]], for the order boxes are built
+   * in. A box that cannot be read, or whose job throws, is worth nothing here and goes last; the
+   * build is where it is refused, so ranking it cannot cost it more than its place.
+   */
+  private def worth(bc: BuildContext, job: UpkeepJob, parsed: Try[InputUTXO]): Upkeep.Worth =
+    parsed.flatMap { input =>
+      Try {
+        val (bytes, cost) = Upkeep.floor(input, bc.params)
+        Upkeep.Worth(job.expectedRevenue(input), bytes, cost)
+      }
+    }.getOrElse(Upkeep.Worth.Unknown)
+
+  /**
    * One box through its job: due, worth building against the share, and admitted, or why not. Every
    * call into the job is caught, so a throw on one box costs only that box. A box whose bytes do not
    * hash to the id the node gave is refused, since a transaction from it would spend nothing real.
    */
-  private def attempt(bc: BuildContext, item: JobWork, box: NodeBox, share: Upkeep.Share): Attempt = {
+  private def attempt(bc: BuildContext, item: JobWork, box: NodeBox, parsed: Try[InputUTXO],
+                      share: Upkeep.Share): Attempt = {
     val job = item.job
-    Try(box.toInputUTXO(bc.ctx)) match {
+    parsed match {
       case Failure(ex) => Attempt.Refused(s"the box cannot be read: ${ex.getMessage}")
       case Success(input) if input.id.toString != box.boxId =>
         Attempt.Refused(s"the box serializes to ${input.id.toString}, not the id the node reports")

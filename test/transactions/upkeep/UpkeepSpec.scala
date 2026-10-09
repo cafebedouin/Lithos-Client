@@ -157,6 +157,23 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     admitAll((1 to 3).map(prepared(_)), maxTxs = 3, CandidateBudget(10L, 10L)) shouldBe empty
   }
 
+  "The order boxes are built in" should "put the most revenue per byte first, then per unit of cost" in {
+    val worths = Map(
+      "dear" -> Upkeep.Worth(revenue = 1000L, bytes = 200L, cost = 20000L),
+      "cheap" -> Upkeep.Worth(revenue = 1000L, bytes = 100L, cost = 20000L),
+      "lean" -> Upkeep.Worth(revenue = 1000L, bytes = 200L, cost = 10000L),
+      "free" -> Upkeep.Worth(revenue = 0L, bytes = 50L, cost = 5000L))
+    Upkeep.byWorth(Seq("free", "dear", "lean", "cheap"))(worths) shouldBe Seq("cheap", "lean", "dear", "free")
+  }
+
+  it should "keep the order it was given among boxes worth the same, and put no revenue last" in {
+    val same = Upkeep.Worth(revenue = 500L, bytes = 100L, cost = 1000L)
+    val worths = Map("c" -> same, "a" -> same, "b" -> same,
+      "unread" -> Upkeep.Worth.Unknown, "none" -> Upkeep.Worth(0L, 100L, 1000L))
+    Upkeep.byWorth(Seq("unread", "c", "none", "a", "b"))(worths) shouldBe Seq("c", "a", "b", "unread", "none")
+    Upkeep.byWorth(Seq.empty[String])(worths) shouldBe empty
+  }
+
   "A successor's kind" should "name its job, so a refused block says which one built it" in {
     Upkeep.kind("heartbeat") shouldBe "upkeep:heartbeat"
   }
