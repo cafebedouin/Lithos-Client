@@ -10,7 +10,7 @@ import scala.io.Source
  * that hold the client's pinned tree to it. The client itself never compiles it: `HeartbeatJob`
  * carries the tree, and the source is kept with the tests as the record of what that tree is.
  *
- * `DueJob` takes no constants: a box under it is found by its tree alone, so the tree is the same
+ * `DueJob` takes no compile-time constants: a box under it is found by its tree alone, so the tree is the same
  * for every network and deployment.
  */
 object UpkeepContracts {

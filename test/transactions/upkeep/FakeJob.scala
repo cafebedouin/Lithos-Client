@@ -60,6 +60,7 @@ final class FakeJob(wallet: NodeWallet, val name: String = "fake") extends Upkee
       case CannotPayFor(_) => throw new IllegalStateException("the fake job cannot sign")
       case CannotPayAny(ids) if ids.contains(box.id.toString) => None
       case CannotPayAny(_) => Some(advance(ctx, Seq(box), height, payTo))
+      case PayElsewhere(to) => Some(advance(ctx, Seq(box), height, to))
     }
   }
 
@@ -107,6 +108,9 @@ object FakeJob {
 
   /** Say these boxes cannot pay, and advance every other. */
   final case class CannotPayAny(ids: Set[String]) extends Behaviour
+
+  /** Send the tip to this contract instead of the miner's: a direct job going astray. */
+  final case class PayElsewhere(to: Contract) extends Behaviour
 
   /** Fail inside the build. */
   case object Throw extends Behaviour

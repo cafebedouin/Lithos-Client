@@ -58,7 +58,7 @@ trait UpkeepJob {
 
 object UpkeepJob {
 
-  /** The signed successor and its revenue outputs. The source sizes it, so no job can understate it. */
+  /** The signed successor and its revenue outputs. The source sizes it, which leaves out script cost. */
   final case class Built(tx: SignedTransaction, capital: Seq[CapitalEntry] = Seq.empty)
 }
 

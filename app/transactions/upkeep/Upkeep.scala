@@ -91,10 +91,24 @@ object Upkeep {
    * back: `treeOf` is the script of every box read back, by id, and `wallet` the trees of the
    * wallet's keys (its P2PK trees and its miner-reward trees). The build refuses any input it did
    * not read back before asking this, so together the two checks cover every input: whatever a job
-   * reports, no upkeep transaction spends the operator's ERG.
+   * reports, no upkeep transaction spends a box at this wallet's P2PK or miner-reward scripts.
+   * Value the operator holds under other scripts is outside this check.
    */
   def walletInputs(signed: SignedTransaction, treeOf: Map[String, String], wallet: Set[String]): Set[String] =
     RollupExecution.signedInputIds(signed).filter(id => treeOf.get(id).exists(wallet.contains))
+
+  /**
+   * The outputs of a signed transaction whose script is not among `allowed` (the scripts of its
+   * inputs and this miner's collection contract), by index. Empty for an acceptable transaction:
+   * value leaves the maintained boxes only as this miner's revenue, never as a fee or to anyone
+   * else. Holds for every job, since it reads the signed transaction, not the plan.
+   */
+  def strayOutputs(signed: SignedTransaction, allowed: Set[String]): Seq[Int] = {
+    import scala.collection.JavaConverters._
+    signed.getOutputsToSpend.asScala.zipWithIndex.collect {
+      case (out, i) if !allowed.contains(out.getErgoTree.bytesHex) => i
+    }
+  }
 
   // ─── fitting ──────────────────────────────────────────────────────────────
 

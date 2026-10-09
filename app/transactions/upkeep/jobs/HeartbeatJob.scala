@@ -56,18 +56,18 @@ final class HeartbeatJob(boxIds: Seq[String], minTip: Long = HeartbeatJob.Defaul
       // Sized at the full value, the most a successor could carry, so the floor is never understated.
       val successorFloor = ScriptJob.minimumValue(successor(box, beat, bc.height, box.value), bc)
       // Below its own successor's minimum the box cannot be recreated at all: declined, not built.
-      if (box.value < successorFloor) None else Some(beat)
-    }.flatMap { beat =>
-      val successorFloor = ScriptJob.minimumValue(successor(box, beat, bc.height, box.value), bc)
-      val paid = math.max(0L, math.min(beat.tip, box.value - successorFloor))
-      val tipOut = UTXO(bc.payTo, paid).setCreationHeight(bc.height)
-      val paysItsOwnBox = paid > 0L && paid >= ScriptJob.minimumValue(tipOut, bc)
-      // With minTip set, a beat that would pay less than that is declined, free beats included; the
-      // box is then held until it changes, as any box that cannot pay is.
-      if (minTip > 0L && (!paysItsOwnBox || paid < minTip)) None
-      else if (paysItsOwnBox)
-        Some(Successor(Seq(successor(box, beat, bc.height, box.value - paid), tipOut), revenue = Seq(1)))
-      else Some(Successor(Seq(successor(box, beat, bc.height, box.value))))
+      if (box.value < successorFloor) None
+      else {
+        val paid = math.max(0L, math.min(beat.tip, box.value - successorFloor))
+        val tipOut = UTXO(bc.payTo, paid).setCreationHeight(bc.height)
+        val paysItsOwnBox = paid > 0L && paid >= ScriptJob.minimumValue(tipOut, bc)
+        // With minTip set, a beat that would pay less than that is declined, free beats included;
+        // the box is then held until it changes, as any box that cannot pay is.
+        if (minTip > 0L && (!paysItsOwnBox || paid < minTip)) None
+        else if (paysItsOwnBox)
+          Some(Successor(Seq(successor(box, beat, bc.height, box.value - paid), tipOut), revenue = Seq(1)))
+        else Some(Successor(Seq(successor(box, beat, bc.height, box.value))))
+      }
     }
 
   /** The box as its script demands it back: same script and tokens, R4 at `height`, R5 and R6 kept. */
@@ -81,7 +81,7 @@ object HeartbeatJob {
 
   final val Name = "heartbeat"
 
-  /** The one key of its own: `minTip`, the smallest tip a box must offer, 0 by default. */
+  /** The one key of its own: `minTip`, the smallest tip a beat must pay; [[DefaultMinTip]] by default. */
   final val MinTipKey = "minTip"
 
   /**
@@ -99,7 +99,7 @@ object HeartbeatJob {
     })
 
   /**
-   * The ErgoTree of `DueJob.ergo` (kept with the tests) as reviewed. The script takes no constants
+   * The ErgoTree of `DueJob.ergo` (kept with the tests) as reviewed. The script takes no compile-time constants
    * and names no address, so the tree is the same on every network; `HeartbeatJobSpec` compiles it
    * for mainnet and testnet and holds both to this.
    */

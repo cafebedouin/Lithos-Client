@@ -59,6 +59,4 @@ object ScriptGenerator {
     script
   }
 
-  /** Scripts the upkeep source's jobs advance: boxes that state their own successor. */
-
 }

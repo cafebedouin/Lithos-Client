@@ -3,7 +3,8 @@
 ## What
 
 A new transaction source, `upkeep`, that advances boxes other protocols leave for anyone to maintain,
-inside this miner's own block candidate, with no key and no fee. It is a registry of jobs: each job is a
+inside this miner's own block candidate, with no key and no fee (enforced for every job by the source's input and
+output rules, and by `ScriptJob`'s keyless prover). It is a registry of jobs: each job is a
 reviewed description of one protocol's boxes — which ones it maintains, when one is due, and what its
 successor is — and the source around it owns everything else: a discovery timer, revalidation by reading
 the boxes back before a block is built, sizing and fitting to the source's share, a memory of refused and
@@ -46,7 +47,8 @@ are what let the source be tested end to end on a devnet rather than on mainnet:
   malformed id, or names another network stops the client with the key at fault.
 - `tools.DeployProtocol`: a deployer that mints the eight protocol tokens, creates the emission, config, fraud
   control and dictionary genesis boxes with the client's own contract code, writes the descriptor, and can
-  fund operator keys with ERG and LIT. One transaction per step, each waited for. `DEVNET.md` documents both.
+  fund operator keys with ERG and LIT. One transaction per mint, one for the protocol boxes and one for funding, each waited for until its first output
+  is in the UTXO set. `DEVNET.md` documents both.
 
 A spec pins every protocol contract's tree on mainnet and testnet (`test/resources/deployment/contract-pins.txt`)
 so that neither piece can move a mainnet tree unnoticed; the pins were recorded from the base commit's own
@@ -67,18 +69,21 @@ protocol's maintenance be added as one reviewed job rather than a new source eac
 ## Off by default
 
 `stratum.candidate.sources.upkeep.enabled = false` ships, and so does every job's flag. With the default
-config nothing changes: no actor is started and no node read is made. No actor is started either while no
+config nothing changes: no actor is started and no node read is made, by construction of the wiring. No actor is
+started either while no
 job is enabled. A job name that is enabled and unknown is refused at startup by config validation.
 
-## Not extractive
+## Mempool and front-running
 
-Upkeep's only use of the mempool is to skip a box a pending transaction already spends; it never reads what pending
-transactions do, and discovery reads confirmed boxes only. A job's transaction may only spend boxes that job reported
-from discovery, never a box at one of this wallet's keys, may pay no fee, and may send revenue only to this miner's
-collection contract; the source and `ScriptJob` refuse each of those. The miner takes the tip another executor would
-otherwise have earned in that block, which is the ordinary block-producer advantage. A box both the rent source and
-upkeep could claim in one package (a due-job box nobody beat for four years) is admitted once: the builder refuses the
-second bundle as a conflicting spend.
+Upkeep's only use of the mempool is the read-back, which skips a box a pending transaction already spends; it never
+reads what pending transactions do, and discovery reads confirmed boxes only. Every input of a job's transaction
+must be a box that job reported and this build read back, and none may sit at this wallet's P2PK or miner-reward
+scripts; every output must sit at an input's own script or this miner's collection contract, so no fee is paid and
+no value goes to anyone else. The source refuses each of those for every job; a `ScriptJob` also makes the box the
+only input and balances exactly, and a job implementing `UpkeepJob` directly is held to the rest (a successor that is
+a fixed function of the box and the height) by review. A beat that reaches the mempool after the read-back loses to
+this miner's block if it finds one. Because a beat is valid only at the height it is stamped with, the tip in
+practice goes to whoever produces the next block, this miner or an executor whose beat that block includes.
 
 ## Limits
 
@@ -97,6 +102,8 @@ second bundle as a conflicting spend.
   read-back is up to 16 node calls of 256 boxes, in the build that starts when the height is known.
 - With `useTruePropCollection`, the tip output is anyone-can-spend until the holding top-up in the same
   package takes it, as the rent source's capital is.
+- A box both the rent source and upkeep could claim in one package (a due-job box nobody beat for four years) is
+  admitted once: the builder keeps the first bundle and refuses the second as a conflicting spend.
 - A package the node rejects is reported to the sources only as a dropped height, so a successor the node's
   check accepted and block validation refused is rebuilt next block; with `verifyWithNode` off that repeats.
   Client-wide, as for the rent source.
@@ -118,15 +125,18 @@ second bundle as a conflicting spend.
   for a block, puts each successor through the node's `/transactions/check` and logs the verdict. To repeat on public
   testnet: a testnet node with `ergo.node.extraIndex = true`; in the client, `stratum.candidate.sources.upkeep.enabled =
   true`, `jobs.heartbeat.enabled = true`, `mode = "observe"`; expect `Upkeep scan holds 1 boxes: heartbeat=1`, then at
-  each height after the box `e5d9d2c29f7be9914c604c8102c6f08839cdd01c006c312c1596c144fe6d8fe1` (period 720, tip 0.01
-  ERG) is due, `Upkeep observe at <height>: heartbeat … the node's check accepts it`.
+  most once per height (a height that arrives while the previous check still runs is skipped) after a box at the
+  script is due, the one live there today being `e5d9d2c2…` (period 720, tip 0.01 ERG; its id changes with each
+  beat, so look for the script's address, in the README, not the id), `Upkeep observe at <height>: heartbeat … the node's check accepts it`.
 - Specs: `UpkeepSpec` (the pure half: cost accounting and floors against the node's own arithmetic for the token term,
   the share, the memory, config and validation), `UpkeepSourceSpec` (the actor against a mocked node: discovery, holds,
   the build's bounds, the wallet check, refresh, observe mode, the candidate protocol), `ScriptJobSpec` (what every
   script job inherits: discovery, keyless and fee-less assembly, the fee and revenue refusals), `HeartbeatJobSpec` (the
   pinned tree, due, the beat's terms, `minTip`), `DueJobSpec` (the contract through the interpreter, one property per
-  condition), `DeployPlanSpec`, `DeploymentSpec`, `DeploymentConfigSpec` and `ProtocolContractsDeploymentSpec` (the
-  deployer, the override, the pins recorded from and checked against the base commit's compiler).
+  condition), `DeployPlanSpec` (the deployer's plan and command line; the broadcasting `Deployer` itself is exercised only
+  by the private-chain run), `DeploymentSpec`, `DeploymentConfigSpec` and `ProtocolContractsDeploymentSpec` (the
+  override, and the contract pins, recorded from the base commit's compiler, as the pin file says, and checked
+  against this branch's).
 - End to end on a private chain with 20-second blocks: the deployer deployed the protocol, the client joined the
   collateral queue with its own ERG and LIT, and a block carried the client's genesis transaction and the upkeep beat
   together, the beat accepted by the node's check (the node's stateful validation at its next height, not the mempool's

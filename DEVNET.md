@@ -81,7 +81,7 @@ demands; each queued box raises it by 20 LIT). The deployer refuses less. Fund g
 Ids are 64 hex characters. A Lithos block is one whose first transaction spends a box holding
 `collatToken`. The box ids are informational: the client finds every box by its token.
 
-## Worked runs
+## What every private-chain run needs
 
 Two things any private-chain run needs:
 

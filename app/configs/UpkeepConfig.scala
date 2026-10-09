@@ -30,9 +30,10 @@ import scala.util.{Failure, Success, Try}
  *                        each successor through the node's transaction check, logging the verdict.
  *                        For an operator with no block yet, who has no other way to see upkeep do
  *                        anything real. Observe keeps no memory: a box candidate mode would set
- *                        aside is rebuilt and logged at every height. It runs only while the
- *                        stratum builds candidates with `blockTransactions = true`, with this source
- *                        enabled, `maxTxs` above 0, and at least one job enabled.
+ *                        aside is rebuilt and logged at every height; a height that arrives while
+ *                        the previous task is still running is skipped, not queued. It runs only
+ *                        while the stratum builds candidates with `blockTransactions = true`, with
+ *                        this source enabled, `maxTxs` above 0, and at least one job enabled.
  * @param verifyWithNode  in candidate mode, put each admitted successor through the node's
  *                        transaction check before offering it, and leave out of that height any
  *                        the node refuses; this is not remembered, and the next height tries the

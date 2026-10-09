@@ -3,7 +3,8 @@
 #
 # These are the trees live boxes sit under. A line that changes means a mainnet or testnet address
 # moved; that is only ever right alongside a redeployment. Recorded 2026-10-08 from the client's own compiler on
-# Java 17 (sigma-state 6.0.x as the build pins it).
+# Java 17 (sigma-state 6.0.x as the build pins it), and checked against the base commit da4a4666's compiler with
+# this file and this spec alone added to it (2026-10-09, 1/1).
 #
 MAINNET payout f5c2fd04b3a95d2767c137389359be6854972126d9f0e53104e3684778655f51
 MAINNET eval 6170156717e706f6b3cd53d4ed908e9b9b4736aa09103eadc4dcddceb9108d27

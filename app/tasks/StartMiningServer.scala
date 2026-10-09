@@ -111,7 +111,7 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
         val ergoDexSource = batcherSource(configs.CandidateSourceConfig.ErgoDex, ergoDexBatcher)
 
         // Upkeep: keyless maintenance of other protocols' boxes, off by default and never spending
-        // this wallet. No actor exists unless the source is enabled with a count, config turns on a
+        // this wallet. No actor exists unless the source is enabled with `maxTxs` above 0, config turns on a
         // job, and the stratum builds block transactions at all, so nothing scans a node for a source
         // that is never asked.
         val upkeepLimits = limitsFor(configs.CandidateSourceConfig.Upkeep)

@@ -27,7 +27,11 @@
   // R5 Int   period, in blocks; must be positive
   // R6 Long  tip per beat, in nanoERG; must not be negative
   // A box whose registers are missing or of other types cannot be spent under this script at all
-  // (`R4[Int].get` on a Long fails), so it is locked until storage rent takes it.
+  // (`R4[Int].get` on a Long fails), so it is locked until storage rent takes it. So is a box funded
+  // at exactly its own minimum with a small R4 or creation height: the successor's R4 and creation
+  // height take more bytes at today's height, so it needs more value than the box holds and no
+  // keyless executor can add any; and a box within a few bytes of the 4,096-byte box limit, whose
+  // successor would grow past it.
 
   // HOW THE BOX ENDS
   // There is no owner and no exit path; the box is keyless end to end. The successor must keep at

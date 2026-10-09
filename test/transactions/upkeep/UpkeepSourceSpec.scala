@@ -394,6 +394,33 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     f.memory.refusedIds shouldBe Set(mine.boxId)
   }
 
+  /** A direct job's outputs are held to the same rule as a script job's: the source checks the signed transaction. */
+  it should "refuse a successor that sends value anywhere but an input's script or this miner's collection contract" in {
+    val f = new Fixture()
+    val a = f.box("a")
+    f.job.discovered = Seq(a.boxId)
+    f.live = Seq(a)
+    f.job.behaviour = FakeJob.PayElsewhere(Contract.FEE)   // a fee output: neither an input's script nor the collection contract
+    f.scanUntil(f.job.builds.get >= 1) shouldBe empty
+    f.memory.refusedIds shouldBe Set(a.boxId)
+  }
+
+  /** A hold must survive a pass in which the job's discovery failed: the job keeps what it last found. */
+  it should "keep holds through a failed discovery pass" in {
+    val f = new Fixture()
+    val poor = f.box("a")
+    f.job.discovered = Seq(poor.boxId)
+    f.live = Seq(poor)
+    f.job.behaviour = FakeJob.Refuse
+    f.scanUntil(f.job.builds.get >= 1) shouldBe empty
+    f.memory.exhaustedIds shouldBe Set(poor.boxId)
+    f.job.discoverFails = true
+    f.source ! ScanTick
+    awaitAssert(f.job.discoveries.get should be >= 2, 20.seconds, 100.millis)
+    Thread.sleep(300)
+    f.memory.exhaustedIds shouldBe Set(poor.boxId)
+  }
+
   /** A refresh at the same height is answered from what was prepared, not rebuilt. */
   it should "answer a refresh at the same height from what it prepared" in {
     val f = new Fixture()

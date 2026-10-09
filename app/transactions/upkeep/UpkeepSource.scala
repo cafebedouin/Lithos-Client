@@ -16,7 +16,10 @@ import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
 
 /**
- * Advances the boxes its jobs maintain inside this miner's own block, with no key and no fee.
+ * Advances the boxes its jobs maintain inside this miner's own block. Every input must be a box
+ * its job reported and this build read back, none at this wallet's keys, and every output must
+ * sit at an input's script or this miner's collection contract; a [[ScriptJob]] also signs with no
+ * key and pays no fee.
  *
  * Two halves, as in the storage-rent source. A timer asks each job what it maintains and keeps only
  * ids; the candidate path reads the boxes back, has each job build the due ones until the share is
@@ -73,6 +76,9 @@ class UpkeepSource(nodeContext: NodeContext,
   /** What the last scan line reported, so an unchanged holding is logged at debug. */
   private var lastHolding: Option[(Map[String, Int], Int, Int)] = None
 
+  /** Every id each job's last successful pass found, held ones included, so holds survive a failed pass. */
+  private var lastFound: Map[String, Set[String]] = Map.empty
+
   /** The highest height observe mode has started a task for, so each height is observed once. */
   private var observedThrough: Int = Int.MinValue
 
@@ -113,9 +119,11 @@ class UpkeepSource(nodeContext: NodeContext,
     case Scanned(Success(pass)) =>
       scanning = false
       tracked ++= pass.map { case (job, found) => job -> found.kept }
+      lastFound ++= pass.map { case (job, found) => job -> found.found }
       // Holds are kept for every box a pass found, kept under the cap or not: a box the cap left out
-      // because it is held must stay held, or it would win the cap again next pass.
-      val known = tracked.values.flatten.toSet ++ pass.values.flatMap(_.found)
+      // because it is held must stay held, or it would win the cap again next pass. A job whose
+      // discovery failed this pass keeps what it last found, so its holds survive the failure too.
+      val known = tracked.values.flatten.toSet ++ lastFound.values.flatten
       val retried = memory.passed(known)
       if (retried.nonEmpty)
         logger.info(s"Upkeep offers ${retried.size} refused boxes again after ${memory.retryAfterScans} " +
@@ -366,8 +374,10 @@ class UpkeepSource(nodeContext: NodeContext,
   /**
    * The job's successor for one due box, sized, or why there is none: [[Attempt.Exhausted]] when
    * the job says the box cannot pay, [[Attempt.Refused]] when the build throws, spends a box the
-   * job never discovered or this build did not read back, or spends a box at one of this wallet's
-   * keys (its P2PK trees and its miner-reward trees).
+   * job never discovered or this build did not read back, spends a box at one of this wallet's
+   * keys (its P2PK trees and its miner-reward trees), or sends value anywhere but an input's own
+   * script or this miner's collection contract (the fee proposition included). These hold for
+   * every job, direct or script; [[ScriptJob]] adds the box as the only input and exact balance.
    */
   private def build(bc: BuildContext, item: JobWork, input: InputUTXO,
                     treeOf: Map[String, String]): Either[Attempt, Upkeep.Prepared] =
@@ -376,16 +386,23 @@ class UpkeepSource(nodeContext: NodeContext,
       case Some(built) => Try {
         // Every input must be a box this build read back: discovered, live, and of a known script.
         // A discovered box held back from this build was not read back, so it does not pass either.
-        val foreign = Upkeep.undiscoveredInputs(built.tx, item.discovered) ++
-          (transactions.engine.execution.RollupExecution.signedInputIds(built.tx) -- treeOf.keySet)
+        val inputIds = transactions.engine.execution.RollupExecution.signedInputIds(built.tx)
+        val foreign = Upkeep.undiscoveredInputs(built.tx, item.discovered) ++ (inputIds -- treeOf.keySet)
         val wallet = nodeContext.getNodeWallet
         val ours = Upkeep.walletInputs(built.tx, treeOf, wallet.signableTrees ++ wallet.rewardTrees.keySet)
+        // Every output must sit at an input's own script or at this miner's collection contract, and
+        // none at the fee proposition: value leaves the maintained boxes only as this miner's revenue.
+        val allowedOut = inputIds.flatMap(treeOf.get) + bc.payTo.ergoTreeHex
+        val astray = Upkeep.strayOutputs(built.tx, allowedOut)
         if (foreign.nonEmpty)
           Left(Attempt.Refused(s"its successor spends ${foreign.size} box(es) the job never discovered or this " +
             s"build did not read back: ${foreign.mkString(", ")}"))
         else if (ours.nonEmpty)
           Left(Attempt.Refused(s"its successor spends ${ours.size} box(es) at this wallet's keys: " +
             ours.mkString(", ")))
+        else if (astray.nonEmpty)
+          Left(Attempt.Refused(s"its successor has ${astray.size} output(s) at neither an input's script nor this " +
+            s"miner's collection contract (a fee output counts): ${astray.mkString(", ")}"))
         else Right(Upkeep.Prepared(item.job.name, input.id.toString,
           Upkeep.member(built.tx, item.job.name, input, bc.params), built.capital))
       }
@@ -475,8 +492,8 @@ object UpkeepSource {
 
   /**
    * Boxes held back from builds, built once where the source is wired so a restarted actor, whose
-   * fields Akka empties, keeps them. Only the actor's thread touches it; the atomics are for
-   * visibility across restarts.
+   * fields Akka empties, keeps them. Only the actor's thread writes it, and every write is a whole
+   * replacement; the scan reads the exhausted set off the actor, which the atomics make safe.
    *
    * A refused box, whose build failed, may have met a passing fault, so it is offered again after
    * `retryAfterScans` passes. An exhausted box, which cannot pay, will not pay later either, so it is
@@ -540,13 +557,13 @@ object UpkeepSource {
   /** Boxes a build found already spent, so they stop being offered. */
   private[upkeep] final case class Spent(ids: Set[String])
 
-  /** Boxes whose builds were refused, so they sit out passes before they are offered again. */
   /** An observe task has finished, so the next height may start one. */
   private[upkeep] case object Observed
 
   /** One job's pass: the ids kept under the cap, and every id the pass found, held ones included. */
   private[upkeep] final case class Pass(kept: Set[String], found: Set[String])
 
+  /** Boxes whose builds were refused, so they sit out passes before they are offered again. */
   private[upkeep] final case class Refused(ids: Set[String])
 
   /** Boxes their job says cannot pay, so they are not offered until a scan stops finding them. */

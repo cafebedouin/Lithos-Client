@@ -174,7 +174,8 @@ stratum.candidate.sources.upkeep.mode = "observe"
 ```
 Upkeep then answers every block request empty and, in the background, builds what it would have offered, asks
 your node to check each transaction (up to `maxTxs` checks per block) and logs the verdict. Observe mode keeps no
-memory; it runs only while the stratum builds block transactions, with the source, a count and a job enabled. The
+memory; it runs only while the stratum builds block transactions, with the source enabled, `maxTxs` above 0 and a job
+enabled, and a height that arrives while the previous check is still running is skipped. The
 heartbeat has boxes to observe on testnet (see below), none on mainnet yet.
 
 **Creating a due-job box.** A due-job box is any box at the heartbeat's script holding three registers: R4 the
@@ -184,7 +185,8 @@ on testnet and `2gXTNpGs3kytbjbWSS8G5uhdZCm9CkBBFKVz1jQ5uosE3S4JmWuQmoCHuxvTEP8y
 on mainnet (the tree `HeartbeatJob.TreeHex`, the same on both). Fund it with the tips you want paid plus the box's
 own minimum. Once it is paid down to its minimum it is beaten for free, or declined by miners that keep the default
 `minTip`; each beat restamps its creation height, so storage rent takes it only if nobody beats it for four years.
-Registers of other types, a zero period, a negative tip, or an R4 + R5 beyond 2,147,483,647 lock the box until
+Registers of other types, a zero period, a negative tip, an R4 + R5 beyond 2,147,483,647, a box funded at exactly its
+minimum with a small R4 (its successor's R4 takes more bytes), or a box within a few bytes of the 4,096-byte limit lock the box until
 storage rent: there is no owner and no exit, so check the registers before sending. On testnet, box
 `e5d9d2c29f7be9914c604c8102c6f08839cdd01c006c312c1596c144fe6d8fe1` (period 720, tip 0.01 ERG) is live.
 
