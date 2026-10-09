@@ -12,9 +12,10 @@ import play.api.{ConfigLoader, Configuration}
  *
  * @param scanIntervalMs gap between discovery passes. Discovery is background work and must never
  *                       be on the path a block is built on.
- * @param maxBoxesPerJob  box ids one job may hold between passes. A job that finds more keeps the
- *                        first this many, so one busy protocol cannot grow the actor's memory or
- *                        the build's node read without bound.
+ * @param maxBoxesPerJob  box ids one job may hold between passes beyond its configured ones. A job
+ *                        that finds more keeps the first this many in its own priority order, so
+ *                        one busy protocol cannot grow the actor's memory or the build's node read
+ *                        without bound.
  * @param retryAfterScans discovery passes a box whose build was refused sits out before it is
  *                        offered again. A refusal may be the box's own doing or the moment's — a
  *                        node that could not be read — and the source cannot tell which, so it
@@ -51,10 +52,11 @@ object UpkeepConfig {
    * them, and the block itself for the keys only that job's factory knows.
    *
    * @param enabled whether the job runs. Off unless config says otherwise.
-   * @param boxIds  boxes to maintain on a node without `extraIndex`, which cannot be asked for boxes
-   *                by script. These are the boxes as they stand: advancing a box gives it a new id,
-   *                which a plain node cannot be asked to follow, so the list has to be refreshed
-   *                once a listed box has been advanced.
+   * @param boxIds  boxes to maintain by id, read from the UTXO set on every node, indexed or not;
+   *                not a fallback, and never cut at `maxBoxesPerJob`. On a plain node they are the
+   *                only boxes a job sees. These are the boxes as they stand: advancing a box gives it
+   *                a new id, which a plain node cannot be asked to follow, so the list goes stale
+   *                with each beat and has to be refreshed.
    * @param block   the whole block, for the job's own keys
    */
   final case class Job(enabled: Boolean = false, boxIds: Seq[String] = Seq.empty,

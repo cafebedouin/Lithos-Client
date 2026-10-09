@@ -324,12 +324,14 @@ class UpkeepSource(nodeContext: NodeContext,
       val height = ctx.getHeight
       jobs.flatMap { job =>
         Try(job.discover(ctx, nodeApi, height)) match {
+          // The ids the operator listed are kept whatever their number; the cap cuts only the
+          // rest, which a job returns in its own priority order.
           case Success(found) =>
-            val distinct = found.distinct
-            if (distinct.size > upkeepConfig.maxBoxesPerJob)
-              logger.warn(s"Upkeep job ${job.name} found ${distinct.size} boxes; keeping the first " +
-                s"${upkeepConfig.maxBoxesPerJob} (stratum.candidate.sources.upkeep.maxBoxesPerJob)")
-            Some(job.name -> distinct.take(upkeepConfig.maxBoxesPerJob).toSet)
+            val (listed, rest) = found.distinct.partition(job.configured.contains)
+            if (rest.size > upkeepConfig.maxBoxesPerJob)
+              logger.warn(s"Upkeep job ${job.name} found ${rest.size} boxes beyond its configured ones; " +
+                s"keeping the first ${upkeepConfig.maxBoxesPerJob} (stratum.candidate.sources.upkeep.maxBoxesPerJob)")
+            Some(job.name -> (listed ++ rest.take(upkeepConfig.maxBoxesPerJob)).toSet)
           case Failure(ex) =>
             logger.warn(s"Upkeep job ${job.name} failed to discover its boxes, keeping the last pass: ${ex.getMessage}")
             None

@@ -23,6 +23,7 @@ final class FakeJob(wallet: NodeWallet, val name: String = "fake") extends Upkee
   import FakeJob._
 
   @volatile var discovered: Seq[String] = Seq.empty
+  @volatile var listed: Set[String] = Set.empty
   @volatile var discoverFails: Boolean = false
   @volatile var isDue: Boolean = true
   @volatile var behaviour: Behaviour = Advance
@@ -36,6 +37,8 @@ final class FakeJob(wallet: NodeWallet, val name: String = "fake") extends Upkee
     if (discoverFails) throw new IllegalStateException("the fake node is down")
     discovered
   }
+
+  override def configured: Set[String] = listed
 
   override def due(box: InputUTXO, height: Int): Boolean = {
     dueChecks.incrementAndGet()

@@ -58,6 +58,12 @@ trait UpkeepJob {
   def discover(ctx: BlockchainContext, api: NodeApi, height: Int): Seq[String]
 
   /**
+   * The box ids the operator listed for this job. The source keeps every one [[discover]] returns
+   * and applies its per-job cap only to the rest, so a box someone asked for by name is never cut.
+   */
+  def configured: Set[String] = Set.empty
+
+  /**
    * Whether `box` may be advanced in a block at `height`. Pure: a decision from the box's own
    * registers and the height, with no node read, because it is asked once per tracked box per
    * block.
@@ -70,7 +76,8 @@ trait UpkeepJob {
    * Signed by the job rather than the source because only the job knows what satisfies its
    * script: a box guarded by a condition that reduces to true takes an empty proof, which a prover
    * holding no secret produces. The outputs are created at `bc.height`, the block they will land
-   * in, and any revenue sits at `bc.payTo`.
+   * in, and any revenue sits at `bc.payTo`. The preHeader at signing carries only that height: a
+   * script reading the miner's key, votes or timestamp would sign here and be refused by the node.
    */
   def build(box: InputUTXO, bc: BuildContext): Option[UpkeepJob.Built]
 }

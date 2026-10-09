@@ -207,6 +207,17 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     f.lastRead should have size 1
   }
 
+  it should "never cut a configured id, and apply the cap to the rest" in {
+    val f = new Fixture(maxBoxes = 1)
+    val boxes = Seq("a", "b", "c", "d").map(f.box)
+    f.job.listed = Set(boxes(2).boxId, boxes(3).boxId)
+    f.job.discovered = Seq(boxes(2).boxId, boxes(3).boxId, boxes(0).boxId, boxes(1).boxId)
+    f.live = boxes
+
+    f.scanUntil(f.readCount > 0)
+    f.lastRead.sorted shouldBe Seq(boxes(2).boxId, boxes(3).boxId, boxes(0).boxId).sorted
+  }
+
   it should "skip a job whose discovery throws and still offer the others' work" in {
     val f = new Fixture(jobs = 2)
     val a = f.box("a")

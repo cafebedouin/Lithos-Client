@@ -7,6 +7,7 @@ import org.ergoplatform.appkit.{BlockchainContext, NetworkType}
 import org.ergoplatform.sdk.ErgoId
 import org.slf4j.{Logger, LoggerFactory}
 import transactions.candidate.{CapitalEntry, CapitalOrigin}
+import transactions.rent.StorageRent
 import work.lithos.mutations.{Contract, InputUTXO, TxBuilder, UTXO}
 
 import java.util.concurrent.ConcurrentHashMap
@@ -17,9 +18,9 @@ import scala.util.{Failure, Success, Try}
  * it reads without spending, and which of the outputs are this miner's.
  *
  * A plan rather than a transaction, so the job states only what its protocol decides and
- * [[ScriptJob]] does the assembly every such job would otherwise repeat. The outputs should spend
- * the box's value exactly: whatever they leave over goes to `payTo` as change, which is not declared
- * as capital and so is never aggregated.
+ * [[ScriptJob]] does the assembly every such job would otherwise repeat. The outputs must spend the
+ * box's value exactly: [[ScriptJob]] refuses a plan that leaves change, since the builder cannot
+ * place sub-minimum change without a fee output and a block transaction carries none.
  *
  * @param outputs    every output, in the order the protocol's script reads them
  * @param dataInputs boxes the script reads, such as an oracle; read by the job through the context
@@ -33,52 +34,58 @@ final case class Successor(outputs: Seq[UTXO],
 
 /**
  * An upkeep job whose boxes all sit at one known script, and whose successor is a fixed function of
- * the box: the shape of every keyless job foreseen so far — the heartbeat, a Dexy tracker, an expiry
- * refund. A job of this shape is its rule and nothing else: the script, when a box is due, and what
- * the successor is.
+ * the box: the heartbeat, a Dexy tracker, an expiry refund. Such a job is its rule and nothing else:
+ * the script, when a box is due, what the successor is, and which boxes go first.
  *
- * Everything around the rule is here, written once, because every such job would otherwise carry its
- * own copy of it and each copy is a place to get wrong what the framework promises:
+ * Everything around the rule is written once here, because each copy of it in a job would be one
+ * more place to get wrong what the framework promises:
  *
- *  - Discovery by script on a node with the extra index, paged and confirmed only, plus the box ids
- *    the operator lists under `jobs.<name>.boxIds`, which is the only route a plain node offers.
- *    Both are taken when both apply. A box is kept only if it sits at the script and its job says it
- *    [[maintains]] it, so a box anyone can create at a public script cannot occupy the source's
- *    per-job cap by being malformed.
- *  - Assembly with no fee and no wallet input: the one box as the only input, the successor's data
- *    inputs, a preHeader at the block's height so `HEIGHT` reads as the block the successor lands
- *    in, and change, if any, to `payTo`.
- *  - Signing with a prover that holds no secret. A script that reduces to true for a well-formed
- *    successor takes the empty proof, which such a prover produces, so this miner's keys are never
- *    in reach of a job.
- *  - The capital entries for the outputs the plan names as revenue.
+ *  - Discovery. On a node with the extra index, every confirmed box at the script, soonest
+ *    [[priority]] first. On every node, indexed or not, the ids listed under `jobs.<name>.boxIds`,
+ *    each read from the UTXO set with one `boxById` call, so an unconfirmed box is never spent
+ *    without its parent; the list is not a fallback, and its boxes come first and are never cut at
+ *    the source's cap. A box is kept only if it sits at the script, its job [[maintains]] it, and
+ *    EIP-27 does not block it, so a box anyone can create at a public script cannot take a place by
+ *    being malformed.
+ *  - Assembly with no fee and no wallet input: the one box as the only input, the plan's data inputs,
+ *    and outputs that spend the box exactly.
+ *  - Signing with a prover that holds no secret, so this miner's keys are never in reach of a job.
+ *    The preHeader at signing carries only the block's height. A script that reads the miner's key,
+ *    votes or the timestamp from it would sign here against placeholder values and be refused by the
+ *    node, so such a protocol does not fit this shape.
  *
- * What stays the job's, in [[plan]], is the check that the box can still pay for its successor:
- * only the job knows its outputs, and [[ScriptJob.minimumValue]] is there to size them.
+ * A job that does not fit — several protocol boxes in one transaction, a box found by token rather
+ * than script — implements [[UpkeepJob]] directly.
  *
- * A job that does not fit this shape — several protocol boxes in one transaction, or a box found by
- * token rather than script — implements [[UpkeepJob]] directly instead.
- *
- * @param boxIds boxes to maintain on a node without the extra index, as read from config
+ * @param boxIds boxes the operator lists for this job, read on every discovery pass
  */
 abstract class ScriptJob(boxIds: Seq[String]) extends UpkeepJob {
 
+  private val listed: Seq[String] = boxIds.map(_.toLowerCase).distinct
+
+  final override def configured: Set[String] = listed.toSet
+
   /**
    * The script every box of this job sits at. Asked on every discovery pass, so an implementation
-   * should compile once per network, which [[ScriptJob.PerNetwork]] does.
+   * should compile once per network, which [[ScriptJob.PerNetwork]] does, or pin the tree.
    */
   def contract(network: NetworkType): Contract
 
   /**
    * Whether a box at the script is one this job could ever advance: its registers are of the types
-   * the script reads, and its terms make sense. Asked at discovery, so a malformed box is never
-   * held. Every box at the script is maintained unless a job says otherwise.
+   * the script reads, and its terms make sense. Asked at discovery, so a malformed box is never held.
    */
   def maintains(box: InputUTXO): Boolean = true
 
   /**
-   * The successor plan for a due box, or nothing when the box cannot be advanced, which is how a
-   * job says a box can no longer pay for its own successor. A throw is treated the same way.
+   * The order discovery keeps boxes in, lowest first, so that when the source's cap cuts the list it
+   * cuts the boxes that can wait. A job with a due height returns it.
+   */
+  def priority(box: InputUTXO): Long = 0L
+
+  /**
+   * The successor plan for a due box, or nothing when the box cannot be advanced, which the source
+   * treats as the box being unable to pay. A throw is treated as a transient refusal.
    */
   def plan(box: InputUTXO, build: BuildContext): Option[Successor]
 
@@ -86,25 +93,36 @@ abstract class ScriptJob(boxIds: Seq[String]) extends UpkeepJob {
   private lazy val logger: Logger = LoggerFactory.getLogger(s"UpkeepJob.$name")
 
   final override def discover(ctx: BlockchainContext, api: NodeApi, height: Int): Seq[String] = {
-    val tree = contract(ctx.getNetworkType).ergoTreeHex
+    val network = ctx.getNetworkType
+    val tree = contract(network).ergoTreeHex
     val indexed = if (api.indexerEnabled) ScriptJob.byTree(api, tree, name) else Seq.empty[NodeBox]
-    val configured = if (boxIds.isEmpty) Seq.empty[NodeBox] else api.boxesWithPoolByIds(boxIds) match {
-      case Success(boxes) => boxes
-      case Failure(ex) =>
-        throw new IllegalStateException(s"could not read the ${boxIds.size} configured $name boxes: ${ex.getMessage}", ex)
+    val read = listed.flatMap { id =>
+      api.boxById(id) match {
+        case Success(box) => box
+        case Failure(ex) =>
+          throw new IllegalStateException(s"could not read configured $name box $id: ${ex.getMessage}", ex)
+      }
     }
     // Parsed once, here: a register that does not decode makes the box as foreign as a wrong script.
-    def ours(box: NodeBox): Boolean =
-      box.ergoTree == tree && Try(maintains(box.toInputUTXO(ctx))).getOrElse(false)
-    // A configured box that is not this job's is the operator's mistake, and the one route to it on
-    // a plain node, so it is named; an indexed box that is not this job's is just someone else's.
-    val (kept, stray) = configured.partition(ours)
-    stray.foreach(box => logger.warn(s"Configured $name box ${box.boxId} is not one this job maintains; ignoring it"))
-    (indexed.filter(ours) ++ kept).map(_.boxId).distinct
+    def ours(box: NodeBox): Option[Long] =
+      if (box.ergoTree != tree) None
+      else Try {
+        val input = box.toInputUTXO(ctx)
+        if (maintains(input) && !StorageRent.blockedByReEmission(input, network)) Some(priority(input)) else None
+      }.toOption.flatten
+    // A configured box that is not this job's is the operator's mistake, so it is named; an indexed
+    // box that is not this job's is just someone else's.
+    val kept = read.filter { box =>
+      val mine = ours(box).isDefined
+      if (!mine) logger.warn(s"Configured $name box ${box.boxId} is not one this job maintains; ignoring it")
+      mine
+    }.map(_.boxId)
+    val found = indexed.flatMap(box => ours(box).map(box.boxId -> _)).sortBy(_._2).map(_._1)
+    (kept ++ found).distinct
   }
 
   final override def build(box: InputUTXO, bc: BuildContext): Option[UpkeepJob.Built] =
-    plan(box, bc).map(successor => ScriptJob.signed(box, successor, bc))
+    plan(box, bc).map(successor => ScriptJob.signed(name, box, successor, bc))
 }
 
 object ScriptJob {
@@ -140,10 +158,13 @@ object ScriptJob {
    * The plan assembled and signed: `box` the only input, no fee, the block's height in the
    * preHeader, an empty proof from a prover with no secret, and the revenue declared as capital.
    */
-  private def signed(box: InputUTXO, successor: Successor, bc: BuildContext): UpkeepJob.Built = {
+  private def signed(job: String, box: InputUTXO, successor: Successor, bc: BuildContext): UpkeepJob.Built = {
     require(successor.revenue.forall(i => i >= 0 && i < successor.outputs.size),
-      s"revenue ${successor.revenue.mkString(", ")} names an output the plan does not have " +
+      s"$job's revenue ${successor.revenue.mkString(", ")} names an output the plan does not have " +
         s"(${successor.outputs.size} outputs)")
+    val spent = successor.outputs.map(_.value).sum
+    require(spent == box.value,
+      s"$job's plan spends $spent of the box's ${box.value} nanoERG; it must spend the box exactly")
     val unsigned = TxBuilder(bc.ctx)
       .setInputs(box)
       .setDataInputs(successor.dataInputs: _*)

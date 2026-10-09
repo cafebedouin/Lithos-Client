@@ -102,7 +102,7 @@ class HeartbeatJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     f.atTree = Seq(a, wrongR4, b, wrongR6, noR6, bare, neverDue, negativeTip, undecodable)
 
     f.discover() shouldBe Seq(a.boxId, b.boxId)
-    verify(f.api, never()).boxesWithPoolByIds(any[Seq[String]])
+    verify(f.api, never()).boxById(any[String])
   }
 
   // ─── due ──────────────────────────────────────────────────────────────────

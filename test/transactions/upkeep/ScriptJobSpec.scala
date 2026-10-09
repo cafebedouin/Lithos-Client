@@ -4,16 +4,16 @@ import node.MutationConversions._
 import node.NodeApi
 import node.model._
 import org.bouncycastle.util.encoders.Hex
-import org.ergoplatform.appkit.Parameters
+import org.ergoplatform.appkit.{NetworkType, Parameters}
 import org.ergoplatform.appkit.impl.SignedTransactionImpl
 import org.mockito.ArgumentMatchers.any
-import org.mockito.Mockito.{never, verify, when}
+import org.mockito.Mockito.{never, times, verify, when}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import support.{CanonicalNodeBox, FakeNodeContext}
 import transactions.engine.execution.RollupExecution
-import work.lithos.mutations.{Contract, InputUTXO}
+import work.lithos.mutations.{Contract, InputUTXO, MainnetEip27Constants}
 
 import java.util.concurrent.atomic.AtomicInteger
 import scala.collection.JavaConverters._
@@ -62,9 +62,10 @@ class ScriptJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
             .map(box => IndexedBox(box, "", box.creationHeight, 1L)))
         }
       }
-    when(api.boxesWithPoolByIds(any[Seq[String]])).thenAnswer { inv =>
-      val asked = inv.getArgument[Seq[String]](0)
-      Success(live.filter(box => asked.contains(box.boxId)))
+    // The UTXO set only: a box missing from `live` is spent or not yet confirmed, and reads as absent.
+    when(api.boxById(any[String])).thenAnswer { inv =>
+      val asked = inv.getArgument[String](0)
+      Success(live.find(_.boxId == asked))
     }
 
     def discover(): Seq[String] = client.execute(ctx => job.discover(ctx, api, ctx.getHeight))
@@ -92,7 +93,30 @@ class ScriptJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     f.atTree = Seq(a, notMaintained, b, undecodable, f.strayBox("e"))
 
     f.discover() shouldBe Seq(a.boxId, b.boxId)
-    verify(f.api, never()).boxesWithPoolByIds(any[Seq[String]])
+    verify(f.api, never()).boxById(any[String])
+  }
+
+  it should "list the boxes it finds by priority, lowest first" in {
+    val f = new Fixture()
+    val late = f.scriptBox("late")
+    val soon = f.scriptBox("soon")
+    val unset = f.scriptBox("unset")
+    f.job.priorities = Map(late.boxId -> 50L, soon.boxId -> 10L)
+    f.atTree = Seq(late, unset, soon)
+
+    f.discover() shouldBe Seq(unset.boxId, soon.boxId, late.boxId)
+  }
+
+  /** EIP-27 forbids the outputs to carry the token the recreation must keep, so no successor exists. */
+  it should "skip a box carrying the re-emission token, as rent does" in {
+    val f = new Fixture()
+    val ordinary = f.scriptBox("a")
+    val reEmission = CanonicalNodeBox(id("r"), id("r"), Parameters.OneErg, 0, 100, tree,
+      Seq(NodeAsset(MainnetEip27Constants.TokenId, 1L)))
+    f.client.execute(ctx => ctx.getNetworkType) shouldBe NetworkType.MAINNET
+    f.atTree = Seq(reEmission, ordinary)
+
+    f.discover() shouldBe Seq(ordinary.boxId)
   }
 
   it should "page the index until a short page" in {
@@ -122,18 +146,34 @@ class ScriptJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
   }
 
   /** The configured ids have to be known before the job exists, so a throwaway fixture mints the boxes. */
-  it should "also read the configured list, without listing a box twice" in {
+  it should "also read the configured list, first and without listing a box twice" in {
     val probe = new Fixture()
     val a = probe.scriptBox("a")
     val b = probe.scriptBox("b")
-    val f = new Fixture(boxIds = Seq(a.boxId, b.boxId))
-    f.atTree = Seq(a)
-    f.live = Seq(a, b)
+    val c = probe.scriptBox("c")
+    val f = new Fixture(boxIds = Seq(b.boxId, a.boxId))
+    f.atTree = Seq(c, a)
+    f.live = Seq(a, b, c)
 
-    f.discover() shouldBe Seq(a.boxId, b.boxId)
+    f.discover() shouldBe Seq(b.boxId, a.boxId, c.boxId)
+    f.job.configured shouldBe Set(a.boxId, b.boxId)
   }
 
-  "Discovery on a plain node" should "fall back to the configured list and never ask the index" in {
+  /** One call per id against the UTXO set: a box only the mempool holds is never offered. */
+  it should "read each configured box by id from the UTXO set, one call each" in {
+    val probe = new Fixture()
+    val a = probe.scriptBox("a")
+    val pending = probe.scriptBox("b")
+    val f = new Fixture(boxIds = Seq(a.boxId, pending.boxId))
+    f.live = Seq(a)
+
+    f.discover() shouldBe Seq(a.boxId)
+    verify(f.api, times(1)).boxById(a.boxId)
+    verify(f.api, times(1)).boxById(pending.boxId)
+    verify(f.api, never()).boxesWithPoolByIds(any[Seq[String]])
+  }
+
+  "Discovery on a plain node" should "read the configured list and never ask the index" in {
     val probe = new Fixture()
     val a = probe.scriptBox("a")
     val spent = probe.scriptBox("b")
@@ -151,13 +191,13 @@ class ScriptJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     f.atTree = Seq(f.scriptBox("a"))
 
     f.discover() shouldBe empty
-    verify(f.api, never()).boxesWithPoolByIds(any[Seq[String]])
+    verify(f.api, never()).boxById(any[String])
     verify(f.api, never()).unspentBoxesByErgoTree(any[String], any[Paging], any[SortDirection], any[MempoolOptions])
   }
 
   it should "throw when the configured boxes cannot be read" in {
     val f = new Fixture(indexed = false, boxIds = Seq(id("a")))
-    when(f.api.boxesWithPoolByIds(any[Seq[String]])).thenReturn(Failure(new RuntimeException("node down")))
+    when(f.api.boxById(any[String])).thenReturn(Failure(new RuntimeException("node down")))
 
     an[IllegalStateException] should be thrownBy f.discover()
   }
@@ -218,6 +258,17 @@ class ScriptJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     f.client.execute { ctx =>
       f.job.cannotPay = true
       f.job.build(f.scriptBox("a").toInputUTXO(ctx), BuildContext(ctx, ctx.getHeight + 1, f.wallet.contract)) shouldBe None
+    }
+  }
+
+  /** The builder cannot place sub-minimum change without a fee output, which a block transaction has none of. */
+  it should "throw on a plan that does not spend the box exactly, naming the job" in {
+    val f = new Fixture()
+    f.client.execute { ctx =>
+      f.job.leftOver = 1L
+      val thrown = the[IllegalArgumentException] thrownBy
+        f.job.build(f.scriptBox("a").toInputUTXO(ctx), BuildContext(ctx, ctx.getHeight + 1, f.wallet.contract))
+      thrown.getMessage should include(f.job.name)
     }
   }
 

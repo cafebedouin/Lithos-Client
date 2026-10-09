@@ -30,18 +30,26 @@ final class FakeScriptJob(boxIds: Seq[String] = Seq.empty, val name: String = "s
   /** Say the box cannot pay for its successor. */
   @volatile var cannotPay: Boolean = false
 
+  /** NanoERG the plan leaves unspent, which [[ScriptJob]] must refuse. */
+  @volatile var leftOver: Long = 0L
+
+  /** Each box's priority by id; zero, the default, for any other. */
+  @volatile var priorities: Map[String, Long] = Map.empty
+
   override def contract(network: NetworkType): Contract = Contract.SIGMA_TRUE
 
   override def maintains(box: InputUTXO): Boolean = !foreign.contains(box.id.toString)
 
   override def due(box: InputUTXO, height: Int): Boolean = isDue
 
+  override def priority(box: InputUTXO): Long = priorities.getOrElse(box.id.toString, 0L)
+
   override def plan(box: InputUTXO, bc: BuildContext): Option[Successor] =
     if (cannotPay) None
     else Some(Successor(
       outputs = Seq(
         UTXO(box.contract, box.value - Tip, box.tokens, box.registers).setCreationHeight(bc.height),
-        UTXO(bc.payTo, Tip).setCreationHeight(bc.height)),
+        UTXO(bc.payTo, Tip - leftOver).setCreationHeight(bc.height)),
       dataInputs = dataInputs,
       revenue = revenue))
 }

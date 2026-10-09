@@ -40,6 +40,9 @@ final class HeartbeatJob(boxIds: Seq[String]) extends ScriptJob(boxIds) {
 
   override def due(box: InputUTXO, height: Int): Boolean = Beat.of(box).exists(_.dueAt(height))
 
+  /** The height the box is due at, so the source's cap keeps the soonest due. */
+  override def priority(box: InputUTXO): Long = Beat.of(box).map(_.dueHeight).getOrElse(Long.MaxValue)
+
   override def plan(box: InputUTXO, bc: BuildContext): Option[Successor] =
     Beat.of(box).map { beat =>
       // Sized at the full value, the most a successor could carry, so the floor is never understated.
@@ -91,7 +94,9 @@ object HeartbeatJob {
    * heartbeat means.
    */
   final case class Beat(lastBeat: Int, period: Int, tip: Long) {
-    def dueAt(height: Int): Boolean = height.toLong >= lastBeat.toLong + period.toLong
+    def dueHeight: Long = lastBeat.toLong + period.toLong
+
+    def dueAt(height: Int): Boolean = height.toLong >= dueHeight
   }
 
   object Beat {

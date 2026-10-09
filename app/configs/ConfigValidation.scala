@@ -38,7 +38,7 @@ object Configs {
     throw new ConfigValidationException(Seq(ConfigProblem(key, problem)))
 
   /**
-   * An upkeep job's fallback box list, which is read back by id on every scan: a malformed id would
+   * An upkeep job's configured box list, which is read back by id on every scan: a malformed id would
    * fail the whole read, and with it every box in the list, on every pass, and more ids than the job
    * may hold would be cut at the first scan without the operator knowing which were dropped.
    */
