@@ -225,8 +225,8 @@ class UpkeepSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     UpkeepRegistry.enabled(UpkeepConfig.Default) shouldBe empty
   }
 
-  "The registry" should "know the heartbeat job, under the name validation checks config against" in {
-    UpkeepRegistry.names shouldBe Seq("heartbeat")
+  "The registry" should "know the heartbeat and keepalive jobs, under the names validation checks config against" in {
+    UpkeepRegistry.names shouldBe Seq("heartbeat", "keepalive")
     UpkeepRegistry.all.map(_.name) shouldBe UpkeepRegistry.names
     UpkeepRegistry.all.foreach(factory => factory.make(UpkeepConfig.Job()).name shouldBe factory.name)
   }

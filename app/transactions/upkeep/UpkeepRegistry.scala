@@ -2,7 +2,7 @@ package transactions.upkeep
 
 import configs.UpkeepConfig
 import play.api.Configuration
-import transactions.upkeep.jobs.HeartbeatJob
+import transactions.upkeep.jobs.{HeartbeatJob, KeepAliveJob}
 
 /**
  * How a registered job is made from its config block. A factory rather than a case class under
@@ -27,7 +27,7 @@ final case class JobFactory(name: String,
  */
 object UpkeepRegistry {
 
-  val all: Seq[JobFactory] = Seq(HeartbeatJob.Factory)
+  val all: Seq[JobFactory] = Seq(HeartbeatJob.Factory, KeepAliveJob.Factory)
 
   /** The names [[all]] answers to, in the same order. Validation checks config against this. */
   def names: Seq[String] = all.map(_.name)
